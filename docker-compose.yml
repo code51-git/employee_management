@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  #  RELATIONAL DATABASE SERVICE 
+  postgres:
+      image: postgres:16-alpine
+      container_name: employee_postgres
+      restart: always
+      environment:
+        POSTGRES_USER: employee_postgres
+        POSTGRES_PASSWORD: secure_db_password
+        POSTGRES_DB: employee_management_system
+      # ports:
+      #   - "5434:5432"  
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U employee_postgres -d employee_management_system"]
+        interval: 5s
+        timeout: 5s
+        retries: 5
+
+  #  IN-MEMORY DATA STORE 
+  redis:
+    image: redis:7-alpine
+    container_name: employee_redis
+    restart: always
+    # ports:
+    #   - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  #  FASTAPI APPLICATION SERVICE 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: employee_api
+    restart: always
+    ports:
+      - "8003:8000"
+    environment:
+      - ENVIRONMENT=development
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_USER=employee_postgres
+      - POSTGRES_PASSWORD=secure_db_password
+      - POSTGRES_DB=employee_management_system
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - FIREBASE_CREDENTIALS_PATH=/app/firebase-service-account.json
+    volumes:
+      - .:/app
+      - ./firebase-service-account.json:/app/firebase-service-account.json
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+
+
+volumes:
+  postgres_data:
+  redis_data:
