@@ -38,6 +38,8 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",
     "http://localhost:8003",
+    "https://admin.code51.co",
+    "https://api.code51.co"
 ]
 
 app.add_middleware(
