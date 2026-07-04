@@ -3,6 +3,7 @@ from uuid import UUID
 from datetime import date
 from typing import List, Optional
 from app.models.user import UserRole, UserStatus
+from app.schemas.payroll import PayrollResponse
 
 class UserProfileRegister(BaseModel):
     email: EmailStr
@@ -12,7 +13,8 @@ class UserProfileRegister(BaseModel):
     whatsapp_number: str | None = None
     company_email: EmailStr | None = None
     address: str | None = None
-    
+    dob: date | None = None
+    gender: str | None = None
     employee_id: str             
     employee_type: str           
     department: str
@@ -47,6 +49,8 @@ class ProfileResponse(BaseModel):
     employee_type: str
     first_name: str
     last_name: str
+    dob: date | None = None
+    gender: str | None = None
     company_email: str | None = None
     phone_number: str | None = None
     whatsapp_number: str | None = None
@@ -57,8 +61,8 @@ class ProfileResponse(BaseModel):
     document_url: str | None = None
     profile_image_url: Optional[str] = None
     total_industry_experience: float | None = 0.0
-    company_experience_years: str
-    
+    company_experience_years: Optional[str] = None 
+    basic_salary :float | None = 0.0
     bank_details: Optional[BankDetailsResponse] = None
     documents: List[EmployeeDocumentResponse] = []
 
@@ -72,7 +76,7 @@ class UserProfileResponse(BaseModel):
     role: UserRole
     status: UserStatus
     profile: ProfileResponse | None = None
-
+    latest_payroll: Optional[PayrollResponse] = None
     class Config:
         from_attributes = True
 
@@ -91,6 +95,9 @@ class UserProfileUpdate(BaseModel):
     
     first_name: str | None = None
     last_name: str | None = None
+    gender: str | None = None
+    dob: str | None = None
+
     phone_number: str | None = None
     whatsapp_number: str | None = None
     company_email: EmailStr | None = None
@@ -100,3 +107,4 @@ class UserProfileUpdate(BaseModel):
     designation: str | None = None
     date_of_joining: date | None = None
     total_industry_experience: float | None = None
+    basic_salary:float | None = 0.0

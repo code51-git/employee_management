@@ -7,71 +7,68 @@ from datetime import datetime
 
 from app.core.database import get_db
 from app.core.security import verify_jwt_token
+from app.core.notifications import send_multicast_push
 from app.services.chat_manager import manager
 from app.models.chats import ChatMessage, room_members
+from app.models.user import User, UserProfile
 
 router = APIRouter(prefix="/ws", tags=["Live WebSocket Engine"])
+
 
 @router.websocket("/chat")
 async def websocket_chat_endpoint(
     websocket: WebSocket,
-    token: str = Query(..., description="JWT authentication token query parameter string"),
+    token: str = Query(...),
     db: AsyncSession = Depends(get_db)
 ):
-    # 1. Accept the handshake immediately so we have an open communication channel
-    await websocket.accept()
-    
-    # 2. Extract and decode the token payload metrics
+    # Validate token BEFORE accepting
     token_data = verify_jwt_token(token)
-    
     if not token_data:
-        # Send a clear message so the frontend knows exactly what went wrong
-        await websocket.send_json({
-            "event": "auth_error",
-            "detail": "Authentication Failed: Token is either invalid or has expired."
-        })
         await websocket.close(code=4001)
         return
 
     try:
         caller_id = uuid.UUID(token_data.get("sub"))
     except (ValueError, TypeError):
-        await websocket.send_json({
-            "event": "auth_error",
-            "detail": "Authentication Failed: Invalid user signature format inside token."
-        })
         await websocket.close(code=4001)
         return
 
-    # 3. Register the connection into the active memory pool
-    from app.services.chat_manager import manager
-    if caller_id not in manager.active_connections:
-        manager.active_connections[caller_id] = []
-    manager.active_connections[caller_id].append(websocket)
-    print(f"🔌 WebSocket session opened successfully for user: {caller_id}")
+    # Accept + register — only ONE accept here
+    await manager.connect(caller_id, websocket)
+
+    # Fetch sender profile once on connect
+    profile_res = await db.execute(
+        select(UserProfile).where(UserProfile.user_id == caller_id)
+    )
+    profile = profile_res.scalars().first()
+    sender_name = f"{profile.first_name} {profile.last_name}" if profile else "Someone"
 
     try:
         while True:
             raw_data = await websocket.receive_text()
             payload = json.loads(raw_data)
-            
+
             target_room_id = uuid.UUID(payload.get("room_id"))
             message_text = payload.get("content", "").strip()
 
             if not message_text:
                 continue
 
-            # Verify the user belongs to the target room context mapping
+            # Verify membership
             membership_res = await db.execute(
-                select(room_members.c.user_id).where(room_members.c.room_id == target_room_id)
+                select(room_members.c.user_id)
+                .where(room_members.c.room_id == target_room_id)
             )
             room_member_ids = [row[0] for row in membership_res.all()]
 
             if caller_id not in room_member_ids:
-                await websocket.send_json({"event": "error", "detail": "Forbidden: You are not a member of this room."})
+                await websocket.send_json({
+                    "event": "error",
+                    "detail": "Forbidden: You are not a member of this room."
+                })
                 continue
 
-            # Persist incoming message to PostgreSQL
+            # Persist message
             new_msg = ChatMessage(
                 id=uuid.uuid4(),
                 room_id=target_room_id,
@@ -82,7 +79,7 @@ async def websocket_chat_endpoint(
             db.add(new_msg)
             await db.commit()
 
-            # Broadcast update payload to all active listeners in the room
+            # Broadcast to online members
             await manager.broadcast_to_room(
                 room_id=target_room_id,
                 message={
@@ -90,18 +87,40 @@ async def websocket_chat_endpoint(
                     "id": str(new_msg.id),
                     "room_id": str(target_room_id),
                     "sender_id": str(caller_id),
+                    "sender_name": sender_name,
                     "content": message_text,
                     "created_at": new_msg.created_at.isoformat()
                 },
                 member_ids=room_member_ids
             )
 
+            # Push to offline members
+            offline_ids = [
+                mid for mid in room_member_ids
+                if mid != caller_id and mid not in manager.active_connections
+            ]
+            if offline_ids:
+                tokens_res = await db.execute(
+                    select(User.fcm_token).where(
+                        User.id.in_(offline_ids),
+                        User.fcm_token.isnot(None)
+                    )
+                )
+                fcm_tokens = [t for t in tokens_res.scalars().all() if t]
+                if fcm_tokens:
+                    await send_multicast_push(
+                        tokens=fcm_tokens,
+                        title=sender_name,
+                        body=message_text[:100],
+                        data={
+                            "event": "new_message",
+                            "room_id": str(target_room_id),
+                            "sender_id": str(caller_id),
+                            "message_id": str(new_msg.id),
+                        }
+                    )
+
     except WebSocketDisconnect:
         manager.disconnect(caller_id, websocket)
-    except Exception:
+    except Exception as e:
         manager.disconnect(caller_id, websocket)
-
-
-@router.get("/test")
-async def ws_test():
-    return {"status": "ws router is mounted"}

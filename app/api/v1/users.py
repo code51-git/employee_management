@@ -6,7 +6,8 @@ from sqlalchemy import func
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin,everyone,admin_only
 from app.core.security import hash_password
-from app.models.user import User, UserProfile, UserRole, UserStatus,EmployeeBankDetails,EmployeeDocument
+from app.models.user import User, UserProfile, UserRole, UserStatus,EmployeeBankDetails,EmployeeDocument,Payroll,EmployeeQualification
+from app.schemas.qualification import *
 from app.schemas.user import UserRegister
 from app.schemas.user_profile import UserProfileResponse,UserProfileRegister,UserListResponse,UserProfileUpdate
 from app.services.email import send_welcome_email
@@ -48,12 +49,22 @@ async def list_employees(
     count_result = await db.execute(count_query)
     total_count = count_result.scalar() or 0
 
+    latest_payroll_id_subquery = (
+        select(Payroll.id)
+        .where(Payroll.user_id == User.id)
+        .order_by(Payroll.pay_period_start.desc())
+        .limit(1)
+        .correlate(User)
+        .scalar_subquery()
+    )
+
     offset = (page - 1) * size
     fetch_query = (
         base_query
         .options(
             selectinload(User.profile).selectinload(UserProfile.bank_details),
-            selectinload(User.profile).selectinload(UserProfile.documents)
+            selectinload(User.profile).selectinload(UserProfile.documents),
+            selectinload(User.payrolls.and_(Payroll.id == latest_payroll_id_subquery))
         )
         .order_by(UserProfile.employee_id.asc())
         .offset(offset)
@@ -61,7 +72,10 @@ async def list_employees(
     )
     
     fetch_result = await db.execute(fetch_query)
-    users = fetch_result.scalars().all()
+    users = fetch_result.scalars().unique().all()
+
+    for user in users:
+        user.latest_payroll = user.payrolls[0] if getattr(user, "payrolls", []) else None
 
     total_pages = (total_count + size - 1) // size if total_count > 0 else 0
 
@@ -84,7 +98,7 @@ async def provision_employee(
     result = await db.execute(select(User).where(User.email == payload.email))
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Account email already exists.")
-        
+
     id_check = await db.execute(select(UserProfile).where(UserProfile.employee_id == payload.employee_id))
     if id_check.scalars().first():
         raise HTTPException(status_code=400, detail="Employee ID number is already assigned.")
@@ -118,21 +132,31 @@ async def provision_employee(
     db.add(new_profile)
     await db.commit()
 
-    new_user.profile = new_profile
+    user_res = await db.execute(
+        select(User)
+        .options(
+            selectinload(User.profile)
+            .selectinload(UserProfile.bank_details),
+            selectinload(User.profile)
+            .selectinload(UserProfile.documents)
+        )
+        .where(User.id == new_user.id)
+    )
+    user = user_res.scalars().first()
 
     background_tasks.add_task(
-        send_welcome_email, 
-        email_to=new_user.email, 
-        password=temp_password, 
+        send_welcome_email,
+        email_to=user.email,
+        password=temp_password,
         first_name=new_profile.first_name
     )
 
-    return new_user
+    return user
 
 #PROFILE
 @router.get("/profile", response_model=UserProfileResponse)
 async def get_user_profile(
-    employee_id: str | None = Query(None, description="HR/Admins can provide an Employee ID to search for records"),
+    user_id: str | None = Query(None, description="HR/Admins can provide an Employee ID to search for records"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
@@ -140,7 +164,22 @@ async def get_user_profile(
     caller_id = current_user.get("sub")
     caller_role = current_user.get("role")
 
-    if employee_id:
+    latest_payroll_id_subquery = (
+        select(Payroll.id)
+        .where(Payroll.user_id == User.id)
+        .order_by(Payroll.pay_period_start.desc())
+        .limit(1)
+        .correlate(User)
+        .scalar_subquery()
+    )
+
+    eager_load_options = [
+        selectinload(User.profile).selectinload(UserProfile.bank_details),
+        selectinload(User.profile).selectinload(UserProfile.documents),
+        selectinload(User.payrolls.and_(Payroll.id == latest_payroll_id_subquery))
+    ]
+
+    if user_id:
         if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -150,29 +189,24 @@ async def get_user_profile(
         result = await db.execute(
             select(User)
             .join(UserProfile)
-            .where(UserProfile.employee_id == employee_id)
-            # 🌟 NESTED LOADS: Pull profile extensions for admin searches
-            .options(
-                selectinload(User.profile).selectinload(UserProfile.bank_details),
-                selectinload(User.profile).selectinload(UserProfile.documents)
-            )
+            .where(UserProfile.user_id == user_id)
+            .options(*eager_load_options)
         )
         target_user = result.scalars().first()
         
         if not target_user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"No employee record found matching ID '{employee_id}'"
+                detail=f"No employee record found matching ID '{user_id}'"
             )
+        
+        target_user.latest_payroll = target_user.payrolls[0] if getattr(target_user, "payrolls", []) else None
         return target_user
 
     result = await db.execute(
         select(User)
         .where(User.id == caller_id)
-        .options(
-            selectinload(User.profile).selectinload(UserProfile.bank_details),
-            selectinload(User.profile).selectinload(UserProfile.documents)
-        )
+        .options(*eager_load_options)
     )
     user = result.scalars().first()
     
@@ -182,21 +216,20 @@ async def get_user_profile(
             detail="User account record missing."
         )
         
+    user.latest_payroll = user.payrolls[0] if getattr(user, "payrolls", []) else None
     return user
 
 #UPDATE PROFILE
-
-@router.patch("/update/{employee_id}", response_model=UserProfileResponse, dependencies=[Depends(hr_and_admin)])
+@router.patch("/update/{user_id}", response_model=UserProfileResponse, dependencies=[Depends(hr_and_admin)])
 async def update_employee_profile(
-    employee_id: str,
+    user_id: str,
     payload: UserProfileUpdate,
     db: AsyncSession = Depends(get_db)
 ):
-
     result = await db.execute(
         select(User)
         .join(UserProfile)
-        .where(UserProfile.employee_id == employee_id)
+        .where(UserProfile.user_id == user_id)
         .options(selectinload(User.profile))
     )
     user = result.scalars().first()
@@ -204,11 +237,10 @@ async def update_employee_profile(
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Employee with ID '{employee_id}' not found."
+            detail=f"Employee with ID '{user_id}' not found."
         )
 
     update_data = payload.model_dump(exclude_unset=True)
-
     account_fields = ["role", "status"]
     
     for key, value in update_data.items():
@@ -218,8 +250,42 @@ async def update_employee_profile(
             setattr(user.profile, key, value)
 
     await db.commit()
-    await db.refresh(user)  
-    return user
+    
+    final_result = await db.execute(
+        select(User)
+        .where(User.id == user.id)
+        .options(selectinload(User.profile))
+    )
+    updated_user = final_result.scalars().first()
+    profile = updated_user.profile
+
+    response_data = {
+        "id": updated_user.id,
+        "email": updated_user.email,
+        "role": updated_user.role,
+        "status": updated_user.status,
+
+        "gender": profile.gender,
+        "dob": profile.dob,
+        "first_name": profile.first_name,
+        "last_name": profile.last_name,
+        "phone_number": profile.phone_number,
+        "whatsapp_number": profile.whatsapp_number,
+        "company_email": profile.company_email,
+        "address": profile.address,
+        "employee_type": profile.employee_type,
+        "department": profile.department,
+        "designation": profile.designation,
+        "date_of_joining": profile.date_of_joining,
+        "total_industry_experience": profile.total_industry_experience,
+        "basic_salary": float(profile.basic_salary) if profile.basic_salary else 0.0,
+        
+        "employee_id": profile.employee_id,
+        "profile_image_url": profile.profile_image_url,
+        "document_url": profile.document_url
+    }
+    
+    return response_data
 
 
 # DELETE EMPLOYEE 
@@ -359,7 +425,6 @@ async def admin_upload_employee_documents(
     if len(document_types) != len(files):
         raise HTTPException(status_code=400, detail="Mismatch between document types and files count.")
 
-    # Load environment credentials
     cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
     cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
     cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
@@ -432,12 +497,9 @@ async def upload_employee_profile_image(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db)
 ):
-    """Streams a profile image directly into Cloudflare R2 and binds the CDN link to the employee record."""
-    # Validate it's an image file format
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be a valid image format (jpg/png).")
 
-    # Load environmental storage connections
     cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
     cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
     cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
@@ -447,22 +509,18 @@ async def upload_employee_profile_image(
     if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
         raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
 
-    # Locate targeted profile record
     prof_res = await db.execute(select(UserProfile).where(UserProfile.user_id == target_user_id))
     profile = prof_res.scalars().first()
     
     if not profile:
         raise HTTPException(status_code=404, detail="Employee target profile record missing.")
 
-    # Generate unique key path index destination path inside R2
     file_extension = os.path.splitext(file.filename)[1]
     unique_key = f"avatars/{profile.id}/avatar{file_extension}"
     r2_endpoint_url = f"https://{cf_account_id}.r2.cloudflarestorage.com"
 
-    # Read binary payload
     file_data = await file.read()
 
-    # Stream file to Cloudflare storage
     session = aioboto3.Session()
     async with session.client(
         "s3",
@@ -480,7 +538,6 @@ async def upload_employee_profile_image(
         except Exception as cloud_err:
             raise HTTPException(status_code=500, detail=f"Cloudflare R2 avatar upload failed: {str(cloud_err)}")
 
-    # Update profile entry link property field tracking 
     final_public_url = f"{cf_public_url}/{unique_key}"
     profile.profile_image_url = final_public_url
     
@@ -490,4 +547,96 @@ async def upload_employee_profile_image(
         "message": "Employee profile image updated successfully.",
         "target_user_id": target_user_id,
         "profile_image_url": final_public_url
+    }
+
+
+#qualification details
+
+@router.post("/create/qualification", response_model=QualificationResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(hr_and_admin)])
+async def create_qualification(payload: QualificationCreate, db: AsyncSession = Depends(get_db)):
+    prof_res = await db.execute(select(UserProfile).where(UserProfile.id == payload.user_profile_id))
+    if not prof_res.scalars().first():
+        raise HTTPException(status_code=404, detail="Target User Profile not found.")
+
+    new_qual = EmployeeQualification(
+        user_profile_id=payload.user_profile_id,
+        degree_name=payload.degree_name,
+        institution=payload.institution,
+        passing_year=payload.passing_year,
+        percentage_or_cgpa=payload.percentage_or_cgpa
+    )
+    
+    db.add(new_qual)
+    await db.commit()
+    await db.refresh(new_qual)
+    return new_qual
+
+
+#  UPDATE RECORD (Admin/HR Only)
+@router.patch("/update/{qualification_id}", response_model=QualificationResponse, dependencies=[Depends(hr_and_admin)])
+async def update_qualification(qualification_id: UUID, payload: QualificationUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeQualification).where(EmployeeQualification.id == qualification_id))
+    record = result.scalars().first()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Qualification record not found.")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(record, key, value)
+
+    await db.commit()
+    await db.refresh(record)
+    return record
+
+
+#  DELETE RECORD (Admin/HR Only)
+@router.delete("/delete/{qualification_id}", status_code=status.HTTP_200_OK, dependencies=[Depends(hr_and_admin)])
+async def delete_qualification(qualification_id: UUID, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(EmployeeQualification).where(EmployeeQualification.id == qualification_id))
+    record = result.scalars().first()
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Qualification record not found.")
+
+    await db.delete(record)
+    await db.commit()
+    return {"message": "Qualification record deleted successfully.", "id": qualification_id}
+
+#list
+@router.get("/list/ualification")
+async def list_qualifications(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=100),
+    target_profile_id: UUID | None = Query(None, description="Filter specifically by an individual profile UUID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+    
+    is_admin = caller_role in ["SUPER_ADMIN", "HR_ADMIN"]  
+    
+    base_query = select(EmployeeQualification).join(UserProfile)
+
+    if not is_admin:
+        base_query = base_query.where(UserProfile.user_id == caller_id)
+    elif target_profile_id:
+        base_query = base_query.where(EmployeeQualification.user_profile_id == target_profile_id)
+
+    count_query = select(func.count(EmployeeQualification.id)).select_from(base_query.subquery())
+    count_res = await db.execute(count_query)
+    total_count = count_res.scalar() or 0
+
+    offset = (page - 1) * size
+    fetch_query = base_query.order_by(EmployeeQualification.passing_year.desc()).offset(offset).limit(size)
+    fetch_res = await db.execute(fetch_query)
+    records = fetch_res.scalars().all()
+
+    return {
+        "total_count": total_count,
+        "page": page,
+        "size": size,
+        "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
+        "items": [QualificationResponse.model_validate(r) for r in records]
     }

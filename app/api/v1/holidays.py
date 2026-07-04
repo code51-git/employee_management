@@ -8,7 +8,7 @@ from datetime import date
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import Holiday
-from app.schemas.holiday import HolidayCreate, HolidayUpdate, HolidayResponse
+from app.schemas.holiday import HolidayCreate, HolidayUpdate, HolidayResponse,HolidayListResponse
 
 router = APIRouter(prefix="/holidays", tags=["Holiday Calendar"])
 
@@ -35,7 +35,7 @@ async def add_new_holiday(payload: HolidayCreate, db: AsyncSession = Depends(get
 
 
 # list 
-@router.get("/list", response_model=dict)
+@router.get("/list", response_model=HolidayListResponse) 
 async def get_holiday_calendar(
     year: int | None = Query(None, description="Filter holidays by a specific year (e.g., 2026)"),
     page: int = Query(1, ge=1),
@@ -64,7 +64,7 @@ async def get_holiday_calendar(
         "page": page,
         "size": size,
         "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
-        "items": holidays
+        "items": holidays  
     }
 
 

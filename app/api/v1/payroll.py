@@ -316,7 +316,13 @@ async def list_payroll_history(
     caller_id = current_user.get("sub")
     caller_role = current_user.get("role")
 
-    base_query = select(Payroll)
+    base_query = (
+        select(Payroll)
+        .options(
+            joinedload(Payroll.user)
+            .joinedload(User.profile)
+        )
+    )
     
     if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
         base_query = base_query.where(Payroll.user_id == caller_id)
@@ -334,13 +340,14 @@ async def list_payroll_history(
     total_count = count_result.scalar() or 0
 
     fetch_result = await db.execute(base_query.offset((page - 1) * size).limit(size))
+    payroll_items = fetch_result.scalars().unique().all()
     
     return {
         "total_count": total_count,
         "page": page,
         "size": size,
         "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
-        "items": fetch_result.scalars().all()
+        "items": payroll_items
     }
 
 

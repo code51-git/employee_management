@@ -20,3 +20,10 @@ class HolidayResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class HolidayListResponse(BaseModel):
+    total_count: int
+    page: int
+    size: int
+    total_pages: int
+    items: list[HolidayResponse]

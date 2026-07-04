@@ -14,7 +14,9 @@ from datetime import datetime, timedelta, timezone
 import secrets
 from app.core.security import hash_password
 from app.services.email import send_password_reset_otp_email
-
+from app.core.permissions import  everyone
+import uuid
+from sqlalchemy import update
 
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -172,3 +174,36 @@ async def verify_otp_and_reset_password(payload: VerifyOTPAndResetSubmit, db: As
     
     await db.commit()
     return {"message": "Password updated successfully. You can now log in using your fresh credentials."}
+
+
+@router.post("/fcm-token", status_code=status.HTTP_200_OK)
+async def update_fcm_token(
+    payload: FCMTokenUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = uuid.UUID(current_user.get("sub"))
+
+    await db.execute(
+        update(User)
+        .where(User.id == caller_id)
+        .values(fcm_token=payload.fcm_token)
+    )
+    await db.commit()
+    return {"message": "FCM token updated successfully."}
+
+
+@router.delete("/fcm-token", status_code=status.HTTP_200_OK)
+async def clear_fcm_token(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = uuid.UUID(current_user.get("sub"))
+
+    await db.execute(
+        update(User)
+        .where(User.id == caller_id)
+        .values(fcm_token=None)
+    )
+    await db.commit()
+    return {"message": "FCM token cleared."}

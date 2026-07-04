@@ -41,3 +41,5 @@ class VerifyOTPAndResetSubmit(BaseModel):
     otp: str = Field(..., min_length=6, max_length=6, description="The 6-digit OTP code")
     new_password: str = Field(..., min_length=8, description="Minimum 8 characters require")
     
+class FCMTokenUpdate(BaseModel):
+    fcm_token: str

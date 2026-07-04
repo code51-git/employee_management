@@ -1,8 +1,24 @@
 # app/schemas/payroll.py
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field,model_validator
 from uuid import UUID
 from datetime import date, datetime
 from app.models.user import PayrollStatus,AdvanceStatus
+from typing import Any
+from pydantic.utils import GetterDict
+
+class PayrollGetter(GetterDict):
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "employee_name":
+            user = getattr(self._obj, "user", None)
+            profile = getattr(user, "profile", None) if user else None
+            if profile:
+                first = getattr(profile, "first_name", "") or ""
+                last = getattr(profile, "last_name", "") or ""
+                full_name = f"{first} {last}".strip()
+                return full_name if full_name else "Team Member"
+            return "Team Member"
+        
+        return getattr(self._obj, key, default)
 
 class PayrollGenerateInput(BaseModel):
     user_id: UUID
@@ -19,6 +35,7 @@ class PayrollGenerateInput(BaseModel):
 class PayrollResponse(BaseModel):
     id: UUID
     user_id: UUID
+    employee_name: str
     pay_period_start: date
     pay_period_end: date
     basic_salary: float
@@ -35,7 +52,35 @@ class PayrollResponse(BaseModel):
 
     class Config:
         from_attributes = True
+    @model_validator(mode="before")
+    @classmethod
+    def assemble_employee_name(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "employee_name" not in data:
+                data["employee_name"] = "Team Member"
+            return data
 
+        user = getattr(data, "user", None)
+        profile = getattr(user, "profile", None) if user else None
+        
+        full_name = "Team Member"
+        if profile:
+            first = getattr(profile, "first_name", "") or ""
+            last = getattr(profile, "last_name", "") or ""
+            combined = f"{first} {last}".strip()
+            if combined:
+                full_name = combined
+
+        setattr(data, "employee_name", full_name)
+        
+        return data
+
+class PayrollListResponse(BaseModel):
+    total_count: int
+    page: int
+    size: int
+    total_pages: int
+    items: list[PayrollResponse]
 
 class PayrollListResponse(BaseModel):
     total_count: int

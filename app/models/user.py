@@ -48,6 +48,7 @@ class User(Base):
     role: Mapped[UserRole] = mapped_column(SQLEnum(UserRole), default=UserRole.USER, index=True, nullable=False)
     status: Mapped[UserStatus] = mapped_column(SQLEnum(UserStatus), default=UserStatus.ACTIVE, nullable=False)
     is_deleted = mapped_column(Boolean, default=False)
+    fcm_token: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -69,6 +70,8 @@ class UserProfile(Base):
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    dob: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    gender: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     department: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     designation: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     date_of_joining: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
@@ -278,7 +281,8 @@ class EmployeeOvertime(Base):
     date_worked = Column(Date, nullable=False)
     hours_worked = Column(Numeric(4, 2), nullable=False) 
     description = Column(String, nullable=True) 
-
+    ot_rate = Column(Numeric(4, 2), nullable=False, default=1.00)
+    ot_final_amount = Column(Numeric(12, 2), nullable=False, default=0.00)
     profile = relationship("UserProfile", back_populates="overtime_records")
 
 
