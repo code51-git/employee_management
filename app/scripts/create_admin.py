@@ -41,6 +41,7 @@ async def create_super_admin():
                 first_name="System",
                 last_name="Administrator",
                 department="Office",
+                employee_id="ADMIN001",
                 designation="Super Admin"
             )
             session.add(admin_profile)

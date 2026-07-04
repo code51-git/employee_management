@@ -41,6 +41,7 @@ async def create_hr_admin():
                 first_name="Human",
                 last_name="Resources",
                 department="Talent Acquisition & Management",
+                employee_id="HR001",
                 designation="HR Manager"
             )
             session.add(hr_profile)
