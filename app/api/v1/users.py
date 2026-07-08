@@ -2,7 +2,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks,Query,Response,Body,Form,File,UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func
+from sqlalchemy import func,extract,case,cast,Integer
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin,everyone,admin_only
 from app.core.security import hash_password
@@ -16,7 +16,9 @@ import os
 import aioboto3
 from typing import List
 import uuid
-
+from datetime import date
+from botocore.config import Config
+import boto3
 
 router = APIRouter(prefix="/users", tags=["User Profiles & Management"])
 UPLOAD_DIR = "static/uploads"
@@ -121,7 +123,7 @@ async def provision_employee(
         last_name=payload.last_name,
         company_email=payload.company_email,
         phone_number=payload.phone_number,
-        whatsapp_number=payload.whatsapp_number,
+        office_number=payload.office_number,
         address=payload.address,
         department=payload.department,
         designation=payload.designation,
@@ -270,7 +272,7 @@ async def update_employee_profile(
         "first_name": profile.first_name,
         "last_name": profile.last_name,
         "phone_number": profile.phone_number,
-        "whatsapp_number": profile.whatsapp_number,
+        "office_number": profile.office_number,
         "company_email": profile.company_email,
         "address": profile.address,
         "employee_type": profile.employee_type,
@@ -348,7 +350,11 @@ async def provision_hr_manager(
         last_name=payload.last_name,
         company_email=payload.company_email,
         phone_number=payload.phone_number,
-        whatsapp_number=payload.whatsapp_number,
+        emergency_number=payload.emergency_number,
+        office_number=payload.office_number,
+        has_medical_conditions=payload.has_medical_conditions,
+        medical_details=payload.medical_details,
+        insurance_number=payload.insurance_number,
         address=payload.address,
         department=payload.department,
         designation=payload.designation,
@@ -551,29 +557,92 @@ async def upload_employee_profile_image(
 
 
 #qualification details
+@router.post("/create/qualification", status_code=status.HTTP_201_CREATED, dependencies=[Depends(everyone)])
+async def create_qualification(
+    user_profile_id: UUID = Form(...),
+    degree_name: str = Form(...),
+    institution: str = Form(...),
+    passing_year: int = Form(...),
+    percentage_or_cgpa: str = Form(...),
+    
+    mark_lists: List[UploadFile] = File(None),
+    grade_card: UploadFile | None = File(None),
+    
+    db: AsyncSession = Depends(get_db)
+):
 
-@router.post("/create/qualification", response_model=QualificationResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(hr_and_admin)])
-async def create_qualification(payload: QualificationCreate, db: AsyncSession = Depends(get_db)):
-    prof_res = await db.execute(select(UserProfile).where(UserProfile.id == payload.user_profile_id))
+    prof_res = await db.execute(select(UserProfile).where(UserProfile.id == user_profile_id))
     if not prof_res.scalars().first():
         raise HTTPException(status_code=404, detail="Target User Profile not found.")
 
+    cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
+    cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
+    cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
+    cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
+    cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
+
+    if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
+        raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
+
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{cf_account_id}.r2.cloudflarestorage.com",
+        aws_access_key_id=cf_access_key,
+        aws_secret_access_key=cf_secret_key,
+        config=Config(signature_version="s3v4")
+    )
+
+    async def upload_to_r2(file_obj: UploadFile, prefix_folder: str) -> str:
+        ext = file_obj.filename.split(".")[-1].lower() if "." in file_obj.filename else "dat"
+        key = f"qualifications/{prefix_folder}/{uuid.uuid4()}.{ext}"
+        content = await file_obj.read()
+        s3_client.put_object(
+            Bucket=cf_bucket_name,
+            Key=key,
+            Body=content,
+            ContentType=file_obj.content_type
+        )
+        return f"{cf_public_url.rstrip('/')}/{key}"
+
+    uploaded_mark_list_urls = []
+    grade_card_url = None
+
+    try:
+        if mark_lists:
+            for file_page in mark_lists:
+                if file_page.filename:  
+                    url = await upload_to_r2(file_page, "mark_lists")
+                    uploaded_mark_list_urls.append(url)
+            
+        if grade_card and grade_card.filename:
+            grade_card_url = await upload_to_r2(grade_card, "grade_cards")
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to push education assets to Cloudflare R2: {str(e)}"
+        )
+
     new_qual = EmployeeQualification(
-        user_profile_id=payload.user_profile_id,
-        degree_name=payload.degree_name,
-        institution=payload.institution,
-        passing_year=payload.passing_year,
-        percentage_or_cgpa=payload.percentage_or_cgpa
+        id=uuid.uuid4(),
+        user_profile_id=user_profile_id,
+        degree_name=degree_name,
+        institution=institution,
+        passing_year=passing_year,
+        percentage_or_cgpa=percentage_or_cgpa,
+        mark_list_urls=uploaded_mark_list_urls, 
+        grade_card_url=grade_card_url
     )
     
     db.add(new_qual)
     await db.commit()
     await db.refresh(new_qual)
+    
     return new_qual
 
 
 #  UPDATE RECORD (Admin/HR Only)
-@router.patch("/update/{qualification_id}", response_model=QualificationResponse, dependencies=[Depends(hr_and_admin)])
+@router.patch("/update/{qualification_id}", response_model=QualificationResponse, dependencies=[Depends(everyone)])
 async def update_qualification(qualification_id: UUID, payload: QualificationUpdate, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(EmployeeQualification).where(EmployeeQualification.id == qualification_id))
     record = result.scalars().first()
@@ -639,4 +708,77 @@ async def list_qualifications(
         "size": size,
         "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
         "items": [QualificationResponse.model_validate(r) for r in records]
+    }
+
+#birthday calendar
+@router.get("/birthday-calendar", dependencies=[Depends(everyone)])
+async def get_birthday_calendar(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db)
+):
+    today = date.today()
+    current_year = today.year
+
+    birth_month_int = cast(extract('month', UserProfile.dob), Integer)
+    birth_day_int = cast(extract('day', UserProfile.dob), Integer)
+    
+    this_year_bday = func.make_date(current_year, birth_month_int, birth_day_int)
+    next_year_bday = func.make_date(current_year + 1, birth_month_int, birth_day_int)
+    
+    next_birthday_date = case(
+        (this_year_bday >= today, this_year_bday),
+        else_=next_year_bday
+    )
+
+    days_until_birthday = next_birthday_date - today
+
+    base_query = (
+        select(
+            UserProfile.id,
+            UserProfile.user_id,
+            UserProfile.first_name,
+            UserProfile.last_name,
+            UserProfile.designation,
+            UserProfile.department,
+            UserProfile.dob,
+            UserProfile.profile_image_url,
+            days_until_birthday.label("days_remaining")
+        )
+        .where(UserProfile.dob.isnot(None))
+    )
+
+    count_query = select(func.count(UserProfile.id)).where(UserProfile.dob.isnot(None))
+    count_result = await db.execute(count_query)
+    total_count = count_result.scalar() or 0
+
+    offset = (page - 1) * size
+    fetch_query = base_query.order_by("days_remaining").offset(offset).limit(size)
+    fetch_result = await db.execute(fetch_query)
+    rows = fetch_result.all()
+
+    formatted_birthdays = []
+    for row in rows:
+        birth_year = row.dob.year
+        target_bday_year = current_year if (date(current_year, row.dob.month, row.dob.day) >= today) else (current_year + 1)
+        turning_age = target_bday_year - birth_year
+
+        formatted_birthdays.append({
+            "user_profile_id": row.id,
+            "user_id": row.user_id,
+            "employee_name": f"{row.first_name} {row.last_name}".strip(),
+            "department": row.department,
+            "designation": row.designation,
+            "profile_image_url": row.profile_image_url,
+            "birth_date": row.dob.strftime("%d %B"), 
+            "days_remaining": row.days_remaining if isinstance(row.days_remaining, int) else row.days_remaining.days,
+            "turning_age": turning_age
+        })
+
+    return {
+        "total_count": total_count,
+        "page": page,
+        "size": size,
+        "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
+        "items": formatted_birthdays
     }

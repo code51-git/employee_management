@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Response,Form,UploadFile,File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
@@ -10,6 +10,12 @@ from app.core.permissions import hr_and_admin, everyone
 from app.models.user import BillRequest, BillStatus, User, UserRole
 from app.schemas.bill import BillRequestCreate, BillReviewPayload, BillListResponse,BillSummaryResponse
 import uuid
+import os
+import boto3
+from botocore.config import Config
+from datetime import date
+from decimal import Decimal
+
 
 
 router = APIRouter(prefix="/bills", tags=["Bill Reimbursements"])
@@ -17,24 +23,72 @@ router = APIRouter(prefix="/bills", tags=["Bill Reimbursements"])
 # SUBMIT BILL REQUEST (EVERYONE / USERS) 
 @router.post("/request", status_code=status.HTTP_201_CREATED)
 async def submit_bill_reimbursement(
-    payload: BillRequestCreate,
+    title: str = Form(...),
+    amount: float = Form(...),
+    spent_date: date = Form(...),
+    description: str = Form(None),
+    file: UploadFile = File(...),  
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
     caller_id = current_user.get("sub")
-    
+
+    cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
+    cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
+    cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
+    cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
+    cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
+
+    if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
+        raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
+
+    try:
+        file_extension = file.filename.split(".")[-1].lower() if "." in file.filename else "dat"
+        unique_filename = f"reimbursements/{uuid.uuid4()}.{file_extension}"
+        
+        s3_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{cf_account_id}.r2.cloudflarestorage.com",
+            aws_access_key_id=cf_access_key,
+            aws_secret_access_key=cf_secret_key,
+            config=Config(signature_version="s3v4")
+        )
+        
+        file_content = await file.read()
+        s3_client.put_object(
+            Bucket=cf_bucket_name,
+            Key=unique_filename,
+            Body=file_content,
+            ContentType=file.content_type  
+        )
+        
+        attachment_url = f"{cf_public_url.rstrip('/')}/{unique_filename}"
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload attachment file to Cloudflare R2: {str(e)}"
+        )
+
     new_bill = BillRequest(
+        id=uuid.uuid4(),
         user_id=caller_id,
-        title=payload.title,
-        amount=payload.amount,
-        description=payload.description,
-        attachment_url=payload.attachment_url,
-        spent_date=payload.spent_date,
+        title=title,
+        amount=Decimal(str(amount)),
+        description=description,
+        attachment_url=attachment_url,  
+        spent_date=spent_date,
         status=BillStatus.PENDING
     )
+    
     db.add(new_bill)
     await db.commit()
-    return {"message": "Bill reimbursement request submitted successfully", "bill_id": new_bill.id}
+    
+    return {
+        "message": "Bill reimbursement request submitted successfully", 
+        "bill_id": new_bill.id,
+        "attachment_url": attachment_url
+    }
 
 
 #  PAGINATED BILL LIST (UNIFIED FOR USERS & ADMINS) 

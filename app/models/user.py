@@ -7,8 +7,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 from app.core.utils import format_experience_string
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID
-
+from sqlalchemy.dialects.postgresql import UUID,ARRAY
+import enum
+from sqlalchemy import func
+from datetime import datetime
 class UserRole(str, Enum):
     SUPER_ADMIN = "super_admin"
     HR_ADMIN = "hr_admin"
@@ -37,6 +39,14 @@ class AdvanceStatus(str, Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     DEDUCTED = "deducted"
+
+
+class TaskStatus(str, enum.Enum):
+    PENDING = "Pending"
+    IN_PROGRESS = "In Progress"
+    COMPLETED = "Completed"
+    OVERDUE = "Overdue"
+    CANCELLED = "Cancelled"
 
 #   CORE USER & ACCOUNT 
 class User(Base):
@@ -70,6 +80,7 @@ class UserProfile(Base):
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     phone_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    emergency_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     dob: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     gender: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     department: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
@@ -80,11 +91,13 @@ class UserProfile(Base):
     employee_id: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False) 
     employee_type: Mapped[str] = mapped_column(String(50), default="Full-Time", nullable=False) 
     company_email: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
-    whatsapp_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    office_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     address: Mapped[Optional[str]] = mapped_column(Text, nullable=True) 
     total_industry_experience: Mapped[Optional[float]] = mapped_column(Float, default=0.0, nullable=True)
     document_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    
+    has_medical_conditions: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    medical_details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    insurance_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     total_experience_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="profile")
@@ -92,8 +105,11 @@ class UserProfile(Base):
     qualifications = relationship("EmployeeQualification", back_populates="profile", cascade="all, delete-orphan")
     documents = relationship("EmployeeDocument",back_populates="profile",cascade="all, delete-orphan")
     overtime_records = relationship("EmployeeOvertime", back_populates="profile", cascade="all, delete-orphan")
+    tasks = relationship("EmployeeTask", back_populates="profile", cascade="all, delete-orphan")
+    previous_companies = relationship("PreviousCompanyDetail",back_populates="profile", cascade="all, delete-orphan")
     @property
     def company_experience_years(self) -> str: 
+
         if not self.date_of_joining:
             return "0 years 0 months 0 days"
             
@@ -151,12 +167,18 @@ class Payroll(Base):
     pay_period_start: Mapped[date] = mapped_column(Date, nullable=False)
     pay_period_end: Mapped[date] = mapped_column(Date, nullable=False)
     
-    # Financial Matrix Snapshots
     basic_salary: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     overtime_pay: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     allowances: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     
+    travel_allowance: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
+    health_allowance: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
+    hra: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)  
+    
+    gross_salary: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
+    
     total_leave_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+    sick_leave_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)  
     lop_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
     lop_deduction: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     
@@ -214,7 +236,7 @@ class AdvanceSalaryRequest(Base):
     amount_requested: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     target_repayment_month: Mapped[date] = mapped_column(Date, nullable=False) # e.g., 2026-07-01 to deduct in July
-    
+    document_url: Mapped[str | None] = mapped_column(String(2048), nullable=True, default=None)
     status: Mapped[AdvanceStatus] = mapped_column(SQLEnum(AdvanceStatus), default=AdvanceStatus.PENDING, nullable=False)
     requested_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -257,7 +279,8 @@ class EmployeeQualification(Base):
     institution = Column(String, nullable=False) 
     passing_year = Column(Integer, nullable=False)
     percentage_or_cgpa = Column(String, nullable=False)
-
+    mark_list_urls = Column(ARRAY(String(2048)), nullable=True, default=[])
+    grade_card_url = Column(String(2048), nullable=True, default=None)
     profile = relationship("UserProfile", back_populates="qualifications")
 
 #empl doc
@@ -272,7 +295,7 @@ class EmployeeDocument(Base):
 
     profile = relationship("UserProfile", back_populates="documents")
 
-
+#employee ot
 class EmployeeOvertime(Base):
     __tablename__ = "employee_overtime"
     
@@ -286,4 +309,54 @@ class EmployeeOvertime(Base):
     profile = relationship("UserProfile", back_populates="overtime_records")
 
 
+#employee tasks
+class EmployeeTask(Base):
+    __tablename__ = "employee_tasks"
 
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    
+    user_profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("user_profiles.id", ondelete="CASCADE"), 
+        nullable=False,
+        index=True
+    )   
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_details: Mapped[str] = mapped_column(Text, nullable=False)   
+    task_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    task_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)  
+    status: Mapped[TaskStatus] = mapped_column(
+        SQLEnum(TaskStatus, name="task_status_enum"), 
+        default=TaskStatus.PENDING, 
+        nullable=False
+    )
+    
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), 
+        server_default=func.now(), 
+        onupdate=func.now(), 
+        nullable=False
+    )
+
+    profile = relationship("UserProfile", back_populates="tasks")
+
+
+#previous company details
+class PreviousCompanyDetail(Base):
+    __tablename__ = "previous_company_details"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_profile_id = Column(UUID(as_uuid=True), ForeignKey("user_profiles.id", ondelete="CASCADE"), nullable=False)
+    company_name = Column(String, nullable=False)
+    comapany_role=Column(String, nullable=False)
+    experience_years = Column(String, nullable=False)  
+    reason_for_leaving = Column(Text, nullable=False)
+    hr_contact_number = Column(String, nullable=True)  
+    
+    company_document_urls = Column(ARRAY(String(2048)), nullable=True, default=[])
+
+    profile = relationship("UserProfile", back_populates="previous_companies")

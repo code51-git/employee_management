@@ -14,6 +14,9 @@ from app.models.chats import (
     MessageRead,
     StarredMessage,
 )
+from app.models.announcement import (Announcement ,AnnouncementRead)
+
+
 config = context.config
 
 if config.config_file_name is not None:
