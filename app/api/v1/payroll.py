@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query,UploadFile,Form,File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
@@ -6,7 +6,10 @@ from sqlalchemy.orm import selectinload, joinedload
 from uuid import UUID
 from datetime import date
 import re
-
+from decimal import Decimal
+from botocore.config import Config
+import os
+import boto3
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import (
@@ -206,6 +209,7 @@ async def list_advance_salary_requests(
                 "reason": req.reason,
                 "target_repayment_month": req.target_repayment_month,
                 "status": req.status,
+                "document_url": req.document_url,
                 "requested_at": req.requested_at
             }
             for req in requests_list
@@ -376,27 +380,76 @@ async def get_payslip_by_id(
 
 
 #advance req
-
-@router.post("/advance-request", response_model=AdvanceSalaryResponse)
+@router.post("/advance-request", status_code=status.HTTP_201_CREATED)
 async def request_salary_advance(
-    payload: AdvanceSalaryCreate,
+    amount_requested: float = Form(...),
+    reason: str = Form(...),
+    target_repayment_month: date = Form(...),
+    document: UploadFile | None = File(None),  
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
-    """Enables standalone employee profiles to enqueue salary advance buffer applications."""
+
     caller_id = current_user.get("sub")
+    attachment_url = None
+
+    cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
+    cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
+    cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
+    cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
+    cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
+
+    if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
+        raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
+
+    if document and document.filename:
+        try:
+            file_extension = document.filename.split(".")[-1].lower() if "." in document.filename else "dat"
+            unique_filename = f"advances/{uuid.uuid4()}.{file_extension}"
+            
+            s3_client = boto3.client(
+                "s3",
+                endpoint_url=f"https://{cf_account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=cf_access_key,
+                aws_secret_access_key=cf_secret_key,
+                config=Config(signature_version="s3v4")
+            )
+            
+            file_content = await document.read()
+            s3_client.put_object(
+                Bucket=cf_bucket_name,
+                Key=unique_filename,
+                Body=file_content,
+                ContentType=document.content_type  
+            )
+            
+            attachment_url = f"{cf_public_url.rstrip('/')}/{unique_filename}"
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to upload document file to Cloudflare R2: {str(e)}"
+            )
+
     new_request = AdvanceSalaryRequest(
+        id=uuid.uuid4(),
         user_id=caller_id,
-        amount_requested=payload.amount_requested,
-        reason=payload.reason,
-        target_repayment_month=payload.target_repayment_month.replace(day=1),
+        amount_requested=Decimal(str(amount_requested)),
+        reason=reason,
+        target_repayment_month=target_repayment_month.replace(day=1),
+        document_url=attachment_url,  
         status=AdvanceStatus.PENDING
     )
+    
     db.add(new_request)
     await db.commit()
     await db.refresh(new_request)
-    return new_request
-
+    
+    return {
+        "message": "Salary advance request submitted successfully", 
+        "request_id": new_request.id,
+        "document_url": attachment_url
+    }
 
 
 

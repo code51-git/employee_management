@@ -124,3 +124,6 @@ async def websocket_chat_endpoint(
         manager.disconnect(caller_id, websocket)
     except Exception as e:
         manager.disconnect(caller_id, websocket)
+
+#-------------------------------------------------------------------------------------------------------------
+

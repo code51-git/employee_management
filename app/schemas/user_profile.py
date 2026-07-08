@@ -10,7 +10,11 @@ class UserProfileRegister(BaseModel):
     first_name: str
     last_name: str
     phone_number: str | None = None
-    whatsapp_number: str | None = None
+    emergency_number: str | None = None
+    office_number: str | None = None
+    has_medical_conditions: bool | None = None
+    medical_details: str | None = None
+    insurance_number: str | None = None
     company_email: EmailStr | None = None
     address: str | None = None
     dob: date | None = None
@@ -53,7 +57,11 @@ class ProfileResponse(BaseModel):
     gender: str | None = None
     company_email: str | None = None
     phone_number: str | None = None
-    whatsapp_number: str | None = None
+    emergency_number: str | None = None
+    office_number: str | None = None
+    has_medical_conditions: bool | None = None
+    medical_details: str | None = None
+    insurance_number: str | None = None
     address: str | None = None
     department: str | None = None
     designation: str | None = None
@@ -99,7 +107,11 @@ class UserProfileUpdate(BaseModel):
     dob: str | None = None
 
     phone_number: str | None = None
-    whatsapp_number: str | None = None
+    emergency_number: str | None = None
+    office_number: str | None = None
+    has_medical_conditions: bool | None = None
+    medical_details: str | None = None
+    insurance_number: str | None = None
     company_email: EmailStr | None = None
     address: str | None = None
     employee_type: str | None = None
@@ -108,3 +120,4 @@ class UserProfileUpdate(BaseModel):
     date_of_joining: date | None = None
     total_industry_experience: float | None = None
     basic_salary:float | None = 0.0
+    
