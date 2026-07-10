@@ -9,7 +9,7 @@ from app.core.security import hash_password
 from app.models.user import User, UserProfile, UserRole, UserStatus,EmployeeBankDetails,EmployeeDocument,Payroll,EmployeeQualification
 from app.schemas.qualification import *
 from app.schemas.user import UserRegister
-from app.schemas.user_profile import UserProfileResponse,UserProfileRegister,UserListResponse,UserProfileUpdate
+from app.schemas.user_profile import UserProfileResponse,UserProfileRegister,UserListResponse,UserProfileUpdate,EmployeeMinimalListResponse
 from app.services.email import send_welcome_email
 from sqlalchemy.orm import selectinload
 import os
@@ -54,7 +54,7 @@ async def list_employees(
     latest_payroll_id_subquery = (
         select(Payroll.id)
         .where(Payroll.user_id == User.id)
-        .order_by(Payroll.pay_period_start.desc())
+        .order_by(Payroll.salary_month.desc())
         .limit(1)
         .correlate(User)
         .scalar_subquery()
@@ -169,7 +169,7 @@ async def get_user_profile(
     latest_payroll_id_subquery = (
         select(Payroll.id)
         .where(Payroll.user_id == User.id)
-        .order_by(Payroll.pay_period_start.desc())
+        .order_by(Payroll.salary_month.desc())
         .limit(1)
         .correlate(User)
         .scalar_subquery()
@@ -442,7 +442,6 @@ async def admin_upload_employee_documents(
 
     r2_endpoint_url = f"https://{cf_account_id}.r2.cloudflarestorage.com"
 
-    # Locate the target employee profile
     prof_res = await db.execute(select(UserProfile).where(UserProfile.user_id == target_user_id))
     profile = prof_res.scalars().first()
     
@@ -451,7 +450,7 @@ async def admin_upload_employee_documents(
 
     uploaded_records = []
 
-    session = aioboto3.Session()
+    session = aioboto3.Session() 
     async with session.client(
         "s3",
         endpoint_url=r2_endpoint_url,
@@ -501,8 +500,18 @@ async def admin_upload_employee_documents(
 async def upload_employee_profile_image(
     target_user_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)  
 ):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+    is_admin = caller_role in ["SUPER_ADMIN", "HR_ADMIN"]
+
+    if not is_admin and str(caller_id) != str(target_user_id):
+        raise HTTPException(
+            status_code=403, 
+            detail="Access Denied. You can only update your own profile avatar."
+        )
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be a valid image format (jpg/png).")
 
@@ -563,8 +572,7 @@ async def create_qualification(
     degree_name: str = Form(...),
     institution: str = Form(...),
     passing_year: int = Form(...),
-    percentage_or_cgpa: str = Form(...),
-    
+  
     mark_lists: List[UploadFile] = File(None),
     grade_card: UploadFile | None = File(None),
     
@@ -629,7 +637,6 @@ async def create_qualification(
         degree_name=degree_name,
         institution=institution,
         passing_year=passing_year,
-        percentage_or_cgpa=percentage_or_cgpa,
         mark_list_urls=uploaded_mark_list_urls, 
         grade_card_url=grade_card_url
     )
@@ -673,7 +680,7 @@ async def delete_qualification(qualification_id: UUID, db: AsyncSession = Depend
     return {"message": "Qualification record deleted successfully.", "id": qualification_id}
 
 #list
-@router.get("/list/ualification")
+@router.get("/list/qualification")
 async def list_qualifications(
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=100),
@@ -782,3 +789,19 @@ async def get_birthday_calendar(
         "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
         "items": formatted_birthdays
     }
+
+#minimal user-list
+@router.get(
+    "/minimal-list", 
+    response_model=List[EmployeeMinimalListResponse], 
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(hr_and_admin)]
+)
+async def get_minimal_employee_list(db: AsyncSession = Depends(get_db)):
+  
+    query = select(UserProfile.employee_id, UserProfile.user_id)
+    
+    result = await db.execute(query)
+    rows = result.all()  
+    
+    return rows

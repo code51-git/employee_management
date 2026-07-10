@@ -1,6 +1,6 @@
 import uuid
-from datetime import datetime, date
 from enum import Enum
+from datetime import datetime, date
 from typing import Optional, List
 from sqlalchemy import String, DateTime, Date, Numeric, ForeignKey, Enum as SQLEnum, Text, Time,Float,Integer,Column,Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -10,7 +10,6 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID,ARRAY
 import enum
 from sqlalchemy import func
-from datetime import datetime
 class UserRole(str, Enum):
     SUPER_ADMIN = "super_admin"
     HR_ADMIN = "hr_admin"
@@ -143,7 +142,7 @@ class Leave(Base):
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[LeaveStatus] = mapped_column(SQLEnum(LeaveStatus), default=LeaveStatus.PENDING, nullable=False)
-    
+    leave_document_url: Mapped[str] = mapped_column(String(2048), nullable=True, default=None)
     user: Mapped["User"] = relationship(back_populates="leave_requests")
 
 
@@ -163,29 +162,29 @@ class Payroll(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    
-    pay_period_start: Mapped[date] = mapped_column(Date, nullable=False)
-    pay_period_end: Mapped[date] = mapped_column(Date, nullable=False)
-    
+
+    salary_month: Mapped[date] = mapped_column(Date, nullable=False)  # ← 2026-06-01 stored, displayed as 2026-06
+
     basic_salary: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
     overtime_pay: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     allowances: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
-    
+
     travel_allowance: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     health_allowance: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
-    hra: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)  
-    
+    hra: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
+
     gross_salary: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    
-    total_leave_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
-    sick_leave_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)  
-    lop_days: Mapped[int] = mapped_column(sa.Integer, default=0, nullable=False)
+
+    total_leave_days: Mapped[float] = mapped_column(Numeric(5, 1), default=0.0, nullable=False)
+    sick_leave_days: Mapped[float] = mapped_column(Numeric(5, 1), default=0.0, nullable=False)
+    casual_leave_days: Mapped[float] = mapped_column(Numeric(5, 1), default=0.0, nullable=False)
+    lop_days: Mapped[float] = mapped_column(Numeric(5, 1), default=0.0, nullable=False)
     lop_deduction: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
-    
+
     deductions: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     advance_deduction: Mapped[float] = mapped_column(Numeric(10, 2), default=0.0, nullable=False)
     net_salary: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)
-    
+
     status: Mapped[PayrollStatus] = mapped_column(SQLEnum(PayrollStatus), default=PayrollStatus.DRAFT, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -278,7 +277,6 @@ class EmployeeQualification(Base):
     degree_name = Column(String, nullable=False) 
     institution = Column(String, nullable=False) 
     passing_year = Column(Integer, nullable=False)
-    percentage_or_cgpa = Column(String, nullable=False)
     mark_list_urls = Column(ARRAY(String(2048)), nullable=True, default=[])
     grade_card_url = Column(String(2048), nullable=True, default=None)
     profile = relationship("UserProfile", back_populates="qualifications")
