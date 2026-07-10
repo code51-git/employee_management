@@ -1,7 +1,6 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
-
 from app.core.config import settings
 from app.core.rate_limiter import redis_client
 from app.models.user import UserRole

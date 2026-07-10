@@ -5,7 +5,6 @@ from sqlalchemy import insert, update, func
 from typing import List, Optional
 import uuid
 from datetime import datetime
-
 from app.core.database import get_db
 from app.core.permissions import everyone, hr_and_admin
 from app.core.notifications import send_multicast_push

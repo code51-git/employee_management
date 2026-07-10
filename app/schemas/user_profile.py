@@ -120,4 +120,10 @@ class UserProfileUpdate(BaseModel):
     date_of_joining: date | None = None
     total_industry_experience: float | None = None
     basic_salary:float | None = 0.0
-    
+
+class EmployeeMinimalListResponse(BaseModel):
+    employee_id:str
+    user_id: UUID     
+
+    class Config:
+        from_attributes = True

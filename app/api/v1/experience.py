@@ -13,7 +13,7 @@ from app.models.user import UserProfile
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 
-router = APIRouter()
+router = APIRouter(tags=["Previous Company Details"])
 
 @router.post("/experience/add", status_code=status.HTTP_201_CREATED)
 async def add_previous_company_details(

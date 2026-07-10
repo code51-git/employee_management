@@ -3,7 +3,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func,delete
 from uuid import UUID
 from typing import Optional
-
 from app.models.user import EmployeeTask, TaskStatus,UserProfile
 from app.schemas.task import TaskCreate, TaskUpdate, TaskResponse,BulkDeletePayload
 from app.core.database import get_db

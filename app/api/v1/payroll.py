@@ -1,176 +1,485 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query,UploadFile,Form,File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, Form, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import func
+from sqlalchemy import func, extract
 from sqlalchemy.orm import selectinload, joinedload
 from uuid import UUID
-from datetime import date
-import re
+from datetime import date, datetime
 from decimal import Decimal
 from botocore.config import Config
 import os
 import boto3
+import uuid
+import re
+from typing import Optional
+
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import (
-    Payroll, 
-    User, 
-    UserProfile, 
-    Leave, 
-    LeaveStatus, 
-    PayrollStatus, 
-    AdvanceSalaryRequest, 
-    AdvanceStatus, 
-    UserRole
+    Payroll, User, UserProfile, Leave, LeaveStatus,
+    PayrollStatus, AdvanceSalaryRequest, AdvanceStatus,
+    UserRole, EmployeeOvertime
 )
 from app.schemas.payroll import (
-    PayrollGenerateInput, 
-    PayrollResponse, 
-    SalaryUpdatePayload, 
-    PayrollListResponse,
-    PayrollAdjustmentPayload,
-    AdvanceSalaryCreate,
-    AdvanceSalaryResponse,
-    AdvanceSalaryReview,
-    AdvanceSalarySummaryResponse
+    PayrollGenerateInput, PayrollResponse, SalaryUpdatePayload,
+    PayrollListResponse, PayrollAdjustmentPayload,
+    AdvanceSalaryCreate, AdvanceSalaryResponse,
+    AdvanceSalaryReview, AdvanceSalarySummaryResponse
 )
-from typing import Optional
-import uuid
-from datetime import datetime
 
 router = APIRouter(prefix="/payroll", tags=["Payroll Management"])
 
 
-#  PAYROLL GENERATION
+
+def parse_salary_month(month_str: str) -> date:
+    try:
+        parts = month_str.strip().split("-")
+        if len(parts) != 2:
+            raise ValueError
+        year = int(parts[0])
+        month = int(parts[1])
+        if year < 2000 or year > 2100:
+            raise ValueError
+        if month < 1 or month > 12:
+            raise ValueError
+        result = date(year, month, 1)
+        assert isinstance(result, date)
+        return result
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid salary_month '{month_str}'. Use YYYY-MM format e.g. '2026-06'"
+        )
+
+
+
+def recalculate_totals(entry: Payroll) -> Payroll:
+    gross = (
+        float(entry.basic_salary) +
+        float(entry.hra) +
+        float(entry.travel_allowance) +
+        float(entry.health_allowance) +
+        float(entry.overtime_pay) +
+        float(entry.allowances)
+    )
+    daily_rate = float(entry.basic_salary) / 30.0
+    lop_deduction = round(float(entry.lop_days) * daily_rate, 2)
+    total_deductions = float(entry.deductions) + lop_deduction + float(entry.advance_deduction)
+    net = round(max(0.0, gross - total_deductions), 2)
+
+    entry.gross_salary = round(gross, 2)
+    entry.lop_deduction = lop_deduction
+    entry.net_salary = net
+    return entry
+
+
+#  GENERATE PAYROLL
 
 @router.post("/generate", response_model=PayrollResponse, dependencies=[Depends(hr_and_admin)])
-async def generate_accurate_employee_payroll(
+async def generate_employee_payroll(
     payload: PayrollGenerateInput,
     db: AsyncSession = Depends(get_db)
 ):
 
-    user_result = await db.execute(
+    salary_month_date = parse_salary_month(payload.salary_month)
+    month_num = salary_month_date.month
+    year_num = salary_month_date.year
+
+    #  Fetch employee 
+    user_res = await db.execute(
         select(User).options(selectinload(User.profile)).where(User.id == payload.user_id)
     )
-    user = user_result.scalars().first()
+    user = user_res.scalars().first()
     if not user or not user.profile:
-        raise HTTPException(status_code=404, detail="Employee contract profile record not found.")
+        raise HTTPException(status_code=404, detail="Employee profile not found.")
 
-    existing_payroll_check = await db.execute(
+    #  Duplicate check
+    existing = await db.execute(
         select(Payroll).where(
             Payroll.user_id == payload.user_id,
-            Payroll.pay_period_start == payload.pay_period_start,
-            Payroll.pay_period_end == payload.pay_period_end
+            Payroll.salary_month == salary_month_date
         )
     )
-    if existing_payroll_check.scalars().first():
+    if existing.scalars().first():
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"Payroll record already exists for this employee from {payload.pay_period_start} "
-                f"to {payload.pay_period_end}. Use the '/adjust/{{payroll_id}}' endpoint if you "
-                f"need to make changes to this draft."
-            )
+            status_code=400,
+            detail=f"Payroll already exists for {payload.salary_month}. Use /adjust/{{payroll_id}} to edit."
         )
 
+    #  Basic salary
     master_basic = float(user.profile.basic_salary)
     final_basic = payload.basic_salary_override if payload.basic_salary_override is not None else master_basic
-    
     if final_basic <= 0:
-        raise HTTPException(status_code=400, detail="Calculated base basic salary must be greater than 0.")
+        raise HTTPException(status_code=400, detail="Basic salary must be greater than 0.")
 
-    final_overtime = payload.overtime_pay_override if payload.overtime_pay_override is not None else 0.0
+    #  Manual fields 
+    final_hra = payload.hra_override if payload.hra_override is not None else 0.0
+    final_travel = payload.travel_allowance_override if payload.travel_allowance_override is not None else 0.0
+    final_health = payload.health_allowance_override if payload.health_allowance_override is not None else 0.0
     final_allowances = payload.allowances_override if payload.allowances_override is not None else 0.0
     final_deductions = payload.deductions_override if payload.deductions_override is not None else 0.0
 
-    total_leaves_taken = 0
-    calculated_lop_days = 0
+    #  Auto-calculate overtime from EmployeeOvertime table 
+    ot_res = await db.execute(
+        select(func.sum(EmployeeOvertime.ot_final_amount)).where(
+            EmployeeOvertime.user_profile_id == user.profile.id,
+            extract('month', EmployeeOvertime.date_worked) == month_num,
+            extract('year', EmployeeOvertime.date_worked) == year_num
+        )
+    )
+    auto_overtime = float(ot_res.scalar() or 0.0)
+
+    #  Auto-calculate leaves 
+    total_leave_days = 0.0
+    sick_leave_days = 0.0
+    casual_leave_days = 0.0
+    lop_days = 0.0
 
     if payload.lop_days_override is not None:
-        calculated_lop_days = payload.lop_days_override
-        total_leaves_taken = payload.lop_days_override
+        lop_days = float(payload.lop_days_override)
     else:
-        leave_result = await db.execute(
+        leave_res = await db.execute(
             select(Leave).where(
                 Leave.user_id == payload.user_id,
                 Leave.status == LeaveStatus.APPROVED,
-                Leave.start_date <= payload.pay_period_end,
-                Leave.end_date >= payload.pay_period_start
+                extract('month', Leave.start_date) == month_num,
+                extract('year', Leave.start_date) == year_num
             )
         )
-        approved_leaves = leave_result.scalars().all()
+        approved_leaves = leave_res.scalars().all()
 
         for leave in approved_leaves:
+            # Parse duration
             match = re.search(r'\d+(\.\d+)?', leave.duration_days)
             days = float(match.group()) if match else 0.0
-            
-            total_leaves_taken += days
-            leave_type_lower = leave.leave_type.lower()
-            
-            if "casual" in leave_type_lower:
-                if days > 0.5:
-                    calculated_lop_days += (days - 0.5)  
-            elif leave_type_lower in ["unpaid leave", "loss of pay", "lop"]:
-                calculated_lop_days += days
+            total_leave_days += days
 
-    target_month_normalized = payload.pay_period_start.replace(day=1)
-    advance_result = await db.execute(
+            leave_type_lower = leave.leave_type.lower().strip()
+
+            if "sick" in leave_type_lower:
+                # 1 free sick leave per month, rest is LOP
+                sick_leave_days += days
+                free_sick = 1.0
+                if sick_leave_days > free_sick:
+                    lop_days += (sick_leave_days - free_sick)
+
+            elif "casual" in leave_type_lower:
+                # 0.5 free casual leave per month, rest is LOP
+                casual_leave_days += days
+                free_casual = 0.5
+                if casual_leave_days > free_casual:
+                    lop_days += (casual_leave_days - free_casual)
+
+            elif any(x in leave_type_lower for x in ["unpaid", "loss of pay", "lop"]):
+                lop_days += days
+
+    #  Auto-calculate advance deduction 
+    advance_res = await db.execute(
         select(AdvanceSalaryRequest).where(
             AdvanceSalaryRequest.user_id == payload.user_id,
             AdvanceSalaryRequest.status == AdvanceStatus.APPROVED,
-            AdvanceSalaryRequest.target_repayment_month == target_month_normalized
+            AdvanceSalaryRequest.target_repayment_month == salary_month_date
         )
     )
-    approved_advances = advance_result.scalars().all()
-    auto_advance_deduction = sum(float(adv.amount_requested) for adv in approved_advances)
+    approved_advances = advance_res.scalars().all()
+    advance_deduction = sum(float(adv.amount_requested) for adv in approved_advances)
 
-    daily_salary_rate = final_basic / 30.0
-    computed_lop_deduction = calculated_lop_days * daily_salary_rate
+    #  Calculate gross, LOP deduction, net 
+    daily_rate = final_basic / 30.0
+    lop_deduction = round(lop_days * daily_rate, 2)
 
-    gross_earnings = final_basic + final_allowances + final_overtime
-    total_all_deductions = final_deductions + computed_lop_deduction + auto_advance_deduction
-    
-    final_net_salary = max(0.0, gross_earnings - total_all_deductions)
+    gross = round(
+        final_basic + final_hra + final_travel +
+        final_health + final_allowances + auto_overtime,
+        2
+    ) 
+    total_deductions = final_deductions + lop_deduction + advance_deduction
+    net = round(max(0.0, gross - total_deductions), 2)
 
+    # Create payroll record 
     new_payroll = Payroll(
         user_id=payload.user_id,
-        pay_period_start=payload.pay_period_start,
-        pay_period_end=payload.pay_period_end,
+        salary_month=salary_month_date,
         basic_salary=final_basic,
-        overtime_pay=final_overtime,
+        hra=final_hra,
+        travel_allowance=final_travel,
+        health_allowance=final_health,
+        overtime_pay=auto_overtime,
         allowances=final_allowances,
-        total_leave_days=total_leaves_taken,
-        lop_days=calculated_lop_days,
-        lop_deduction=round(computed_lop_deduction, 2),
-        advance_deduction=round(auto_advance_deduction, 2),
+        gross_salary=gross,
+        total_leave_days=total_leave_days,
+        sick_leave_days=sick_leave_days,
+        casual_leave_days=casual_leave_days,
+        lop_days=lop_days,
+        lop_deduction=lop_deduction,
         deductions=final_deductions,
-        net_salary=round(final_net_salary, 2),
+        advance_deduction=advance_deduction,
+        net_salary=net,
         status=PayrollStatus.DRAFT
     )
 
+    # Mark advances as deducted
     for adv in approved_advances:
         adv.status = AdvanceStatus.DEDUCTED
 
     db.add(new_payroll)
     await db.commit()
-    await db.refresh(new_payroll)
-    return new_payroll
 
-#list
-@router.get("/advance-salary/list")
-async def list_advance_salary_requests(
-    page: int = Query(1, ge=1, description="Page number index"),
-    size: int = Query(10, ge=1, le=100, description="Items per window page"),
-    status_filter: Optional[AdvanceStatus] = Query(None, description="Filter requests by status"),
-    target_user_id: Optional[uuid.UUID] = Query(None, description="HR/Admin only: filter results for a specific employee"),
+    # Reload with user relationship
+    result = await db.execute(
+        select(Payroll)
+        .options(joinedload(Payroll.user).joinedload(User.profile))
+        .where(Payroll.id == new_payroll.id)
+    )
+    return result.scalars().first()
+
+
+#  ADJUST PAYROLL 
+
+@router.patch("/adjust/{payroll_id}", response_model=PayrollResponse, dependencies=[Depends(hr_and_admin)])
+async def adjust_payroll(
+    payroll_id: UUID,
+    payload: PayrollAdjustmentPayload,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
+    entry = result.scalars().first()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Payroll record not found.")
+    if entry.status == PayrollStatus.PAID:
+        raise HTTPException(status_code=400, detail="Cannot alter a PAID payroll record.")
+
+    if payload.basic_salary is not None:       entry.basic_salary = payload.basic_salary
+    if payload.hra is not None:                entry.hra = payload.hra
+    if payload.travel_allowance is not None:   entry.travel_allowance = payload.travel_allowance
+    if payload.health_allowance is not None:   entry.health_allowance = payload.health_allowance
+    if payload.overtime_pay is not None:       entry.overtime_pay = payload.overtime_pay
+    if payload.allowances is not None:         entry.allowances = payload.allowances
+    if payload.deductions is not None:         entry.deductions = payload.deductions
+    if payload.lop_days is not None:           entry.lop_days = payload.lop_days
+    if payload.advance_deduction is not None:  entry.advance_deduction = payload.advance_deduction
+    if payload.status is not None:             entry.status = payload.status
+
+    # Recalculate gross and net after any field change
+    entry = recalculate_totals(entry)
+    entry.generated_at = datetime.utcnow()
+
+    await db.commit()
+
+    final = await db.execute(
+        select(Payroll)
+        .options(joinedload(Payroll.user).joinedload(User.profile))
+        .where(Payroll.id == payroll_id)
+    )
+    return final.scalars().first()
+
+
+#  GET PAYROLL BY EMPLOYEE + MONTH
+
+@router.get("/employee/{user_id}", response_model=PayrollResponse)
+async def get_employee_monthly_payroll(
+    user_id: UUID,
+    month: str = Query(..., description="Format: YYYY-MM e.g. 2026-06"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
-
     caller_id = current_user.get("sub")
     caller_role = current_user.get("role")
 
-    base_query = select(AdvanceSalaryRequest).join(UserProfile, UserProfile.user_id == AdvanceSalaryRequest.user_id)
+    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value] and str(user_id) != str(caller_id):
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    salary_month_date = parse_salary_month(month)
+
+    result = await db.execute(
+        select(Payroll)
+        .options(joinedload(Payroll.user).joinedload(User.profile))
+        .where(
+            Payroll.user_id == user_id,
+            Payroll.salary_month == salary_month_date
+        )
+    )
+    payroll = result.scalars().first()
+
+    if not payroll:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No payroll found for employee {user_id} in {month}."
+        )
+
+    return payroll
+
+
+#  LIST PAYROLL HISTORY 
+
+@router.get("/list", response_model=PayrollListResponse)
+async def list_payroll_history(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=100),
+    month: Optional[str] = Query(None, description="Filter by month YYYY-MM"),
+    target_user_id: Optional[UUID] = Query(None, description="Admin: filter by employee"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+
+    base_query = select(Payroll).options(
+        joinedload(Payroll.user).joinedload(User.profile)
+    )
+
+    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
+        base_query = base_query.where(Payroll.user_id == caller_id)
+    elif target_user_id:
+        base_query = base_query.where(Payroll.user_id == target_user_id)
+
+    if month:
+        salary_month_date = parse_salary_month(month)
+        base_query = base_query.where(Payroll.salary_month == salary_month_date)
+
+    count_res = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_res.scalar() or 0
+
+    fetch_res = await db.execute(
+        base_query.order_by(Payroll.salary_month.desc())
+        .offset((page - 1) * size).limit(size)
+    )
+    items = fetch_res.scalars().unique().all()
+
+    return {
+        "total_count": total_count,
+        "page": page,
+        "size": size,
+        "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
+        "items": items
+    }
+
+
+#  GET PAYROLL BY ID 
+
+@router.get("/{payroll_id}", response_model=PayrollResponse)
+async def get_payslip_by_id(
+    payroll_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+
+    result = await db.execute(
+        select(Payroll)
+        .options(joinedload(Payroll.user).joinedload(User.profile))
+        .where(Payroll.id == payroll_id)
+    )
+    entry = result.scalars().first()
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="Payroll record not found.")
+
+    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value] and str(entry.user_id) != str(caller_id):
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    return entry
+
+
+#  UPDATE BASIC SALARY 
+
+@router.patch("/salary-setup/{user_id}", status_code=status.HTTP_200_OK, dependencies=[Depends(hr_and_admin)])
+async def update_master_salary(
+    user_id: UUID,
+    payload: SalaryUpdatePayload,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+    profile = result.scalars().first()
+    if not profile:
+        raise HTTPException(status_code=404, detail="Employee profile not found.")
+
+    profile.basic_salary = payload.basic_salary
+    await db.commit()
+    return {"message": f"Basic salary updated to {payload.basic_salary:.2f}", "user_id": user_id}
+
+
+#  ADVANCE SALARY REQUEST 
+
+@router.post("/advance-request", status_code=status.HTTP_201_CREATED)
+async def request_salary_advance(
+    amount_requested: float = Form(...),
+    reason: str = Form(...),
+    target_repayment_month: date = Form(...),
+    document: UploadFile | None = File(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    attachment_url = None
+
+    cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
+    cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
+    cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
+    cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
+    cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
+
+    if document and document.filename:
+        try:
+            file_extension = document.filename.split(".")[-1].lower() if "." in document.filename else "dat"
+            unique_filename = f"advances/{uuid.uuid4()}.{file_extension}"
+            s3_client = boto3.client(
+                "s3",
+                endpoint_url=f"https://{cf_account_id}.r2.cloudflarestorage.com",
+                aws_access_key_id=cf_access_key,
+                aws_secret_access_key=cf_secret_key,
+                config=Config(signature_version="s3v4")
+            )
+            file_content = await document.read()
+            s3_client.put_object(
+                Bucket=cf_bucket_name,
+                Key=unique_filename,
+                Body=file_content,
+                ContentType=document.content_type
+            )
+            attachment_url = f"{cf_public_url.rstrip('/')}/{unique_filename}"
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+    new_request = AdvanceSalaryRequest(
+        id=uuid.uuid4(),
+        user_id=caller_id,
+        amount_requested=Decimal(str(amount_requested)),
+        reason=reason,
+        target_repayment_month=target_repayment_month.replace(day=1),
+        document_url=attachment_url,
+        status=AdvanceStatus.PENDING
+    )
+    db.add(new_request)
+    await db.commit()
+    await db.refresh(new_request)
+
+    return {
+        "message": "Advance request submitted.",
+        "request_id": new_request.id,
+        "document_url": attachment_url
+    }
+
+
+#  ADVANCE SALARY LIST 
+
+@router.get("/advance-salary/list")
+async def list_advance_requests(
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=100),
+    status_filter: Optional[AdvanceStatus] = Query(None),
+    target_user_id: Optional[uuid.UUID] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+
+    base_query = select(AdvanceSalaryRequest)
 
     if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
         base_query = base_query.where(AdvanceSalaryRequest.user_id == caller_id)
@@ -180,50 +489,65 @@ async def list_advance_salary_requests(
     if status_filter:
         base_query = base_query.where(AdvanceSalaryRequest.status == status_filter)
 
-    count_query = select(func.count(AdvanceSalaryRequest.id)).select_from(base_query.subquery())
-    count_result = await db.execute(count_query)
-    total_count = count_result.scalar() or 0
+    count_res = await db.execute(select(func.count()).select_from(base_query.subquery()))
+    total_count = count_res.scalar() or 0
 
-    offset = (page - 1) * size
-    fetch_query = (
-        base_query
-        .order_by(AdvanceSalaryRequest.requested_at.desc())
-        .offset(offset)
-        .limit(size)
+    fetch_res = await db.execute(
+        base_query.order_by(AdvanceSalaryRequest.requested_at.desc())
+        .offset((page - 1) * size).limit(size)
     )
-    fetch_result = await db.execute(fetch_query)
-    requests_list = fetch_result.scalars().all()
-
-    total_pages = (total_count + size - 1) // size if total_count > 0 else 0
+    items = fetch_res.scalars().all()
 
     return {
         "total_count": total_count,
         "page": page,
         "size": size,
-        "total_pages": total_pages,
+        "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
         "items": [
             {
-                "id": req.id,
-                "user_id": req.user_id,
-                "amount_requested": float(req.amount_requested),
-                "reason": req.reason,
-                "target_repayment_month": req.target_repayment_month,
-                "status": req.status,
-                "document_url": req.document_url,
-                "requested_at": req.requested_at
+                "id": r.id,
+                "user_id": r.user_id,
+                "amount_requested": float(r.amount_requested),
+                "reason": r.reason,
+                "target_repayment_month": r.target_repayment_month,
+                "status": r.status,
+                "document_url": r.document_url,
+                "requested_at": r.requested_at
             }
-            for req in requests_list
+            for r in items
         ]
     }
 
-#adv salary summary
+
+#  ADVANCE SALARY REVIEW 
+
+@router.patch("/advance-review/{advance_id}", dependencies=[Depends(hr_and_admin)])
+async def review_advance_request(
+    advance_id: UUID,
+    payload: AdvanceSalaryReview,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(AdvanceSalaryRequest).where(AdvanceSalaryRequest.id == advance_id))
+    advance = result.scalars().first()
+
+    if not advance:
+        raise HTTPException(status_code=404, detail="Advance request not found.")
+    if advance.status != AdvanceStatus.PENDING:
+        raise HTTPException(status_code=400, detail="Request already reviewed.")
+
+    advance.status = payload.status
+    await db.commit()
+    return {"message": f"Advance status updated to {payload.status.value}"}
+
+
+#  ADVANCE SALARY SUMMARY 
+
 @router.get("/summary", response_model=AdvanceSalarySummaryResponse)
-async def get_advance_salary_requests_summary(
-    target_user_id: Optional[uuid.UUID] = Query(None, description="HR/Admin can pass a specific user UUID to filter metrics"),
+async def advance_salary_summary(
+    target_user_id: Optional[uuid.UUID] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
-
     caller_id = current_user.get("sub")
     caller_role = current_user.get("role")
 
@@ -236,240 +560,11 @@ async def get_advance_salary_requests_summary(
 
     query = query.group_by(AdvanceSalaryRequest.status)
     result = await db.execute(query)
-    
-    status_counts = {row[0]: row[1] for row in result.all()}
-
-    pending_count = status_counts.get(AdvanceStatus.PENDING, 0)
-    approved_count = status_counts.get(AdvanceStatus.APPROVED, 0)
-    rejected_count = status_counts.get(AdvanceStatus.REJECTED, 0)
-    
-    total_count = pending_count + approved_count + rejected_count
+    counts = {row[0]: row[1] for row in result.all()}
 
     return {
-        "total": total_count,
-        "pending": pending_count,
-        "approved": approved_count,
-        "rejected": rejected_count
+        "total": sum(counts.values()),
+        "pending": counts.get(AdvanceStatus.PENDING, 0),
+        "approved": counts.get(AdvanceStatus.APPROVED, 0),
+        "rejected": counts.get(AdvanceStatus.REJECTED, 0),
     }
-
-
-#update basic salary
-
-@router.patch("/salary-setup/{user_id}", status_code=status.HTTP_200_OK, dependencies=[Depends(hr_and_admin)])
-async def update_employee_master_salary(
-    user_id: UUID,
-    payload: SalaryUpdatePayload,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
-    profile = result.scalars().first()
-
-    if not profile:
-        raise HTTPException(status_code=404, detail="Employee target profile profile not localized.")
-
-    profile.basic_salary = payload.basic_salary
-    await db.commit()
-    return {"message": f"Contractual basic salary configured to {payload.basic_salary:.2f}", "user_id": user_id}
-
-
-#patch
-@router.patch("/adjust/{payroll_id}", response_model=PayrollResponse, dependencies=[Depends(hr_and_admin)])
-async def adjust_existing_payroll_record(
-    payroll_id: UUID,
-    payload: PayrollAdjustmentPayload,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
-    entry = result.scalars().first()
-
-    if not entry:
-        raise HTTPException(status_code=404, detail="Payroll transactional record not found.")
-    if entry.status == PayrollStatus.PAID:
-        raise HTTPException(status_code=400, detail="Cannot alter records already locked and marked as PAID.")
-
-    if payload.basic_salary is not None: entry.basic_salary = payload.basic_salary
-    if payload.overtime_pay is not None: entry.overtime_pay = payload.overtime_pay
-    if payload.allowances is not None: entry.allowances = payload.allowances
-    if payload.deductions is not None: entry.deductions = payload.deductions
-    if payload.lop_days is not None: entry.lop_days = payload.lop_days
-    if payload.status is not None: entry.status = payload.status
-
-    daily_rate = float(entry.basic_salary) / 30.0
-    entry.lop_deduction = round(int(entry.lop_days) * daily_rate, 2)
-
-    gross = float(entry.basic_salary) + float(entry.allowances) + float(entry.overtime_pay)
-    deductions = float(entry.deductions) + float(entry.lop_deduction) + float(entry.advance_deduction)
-
-    entry.net_salary = round(max(0.0, gross - deductions), 2)
-    entry.generated_at = datetime.utcnow()
-
-    await db.commit()
-    await db.refresh(entry)
-    return entry
-
-
-#list payroll
-@router.get("/list", response_model=PayrollListResponse)
-async def list_payroll_history(
-    page: int = Query(1, ge=1),
-    size: int = Query(10, ge=1, le=100),
-    target_date: Optional[date] = Query(None, description="Filter payroll records containing this date (YYYY-MM-DD)"), 
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(everyone)
-):  
-    caller_id = current_user.get("sub")
-    caller_role = current_user.get("role")
-
-    base_query = (
-        select(Payroll)
-        .options(
-            joinedload(Payroll.user)
-            .joinedload(User.profile)
-        )
-    )
-    
-    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
-        base_query = base_query.where(Payroll.user_id == caller_id)
-
-    if target_date:
-        base_query = base_query.where(
-            Payroll.pay_period_start <= target_date,
-            Payroll.pay_period_end >= target_date
-        )
-
-    base_query = base_query.order_by(Payroll.pay_period_start.desc())
-
-    subq = base_query.subquery()
-    count_result = await db.execute(select(func.count()).select_from(subq))
-    total_count = count_result.scalar() or 0
-
-    fetch_result = await db.execute(base_query.offset((page - 1) * size).limit(size))
-    payroll_items = fetch_result.scalars().unique().all()
-    
-    return {
-        "total_count": total_count,
-        "page": page,
-        "size": size,
-        "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
-        "items": payroll_items
-    }
-
-
-#get payroll by id
-@router.get("/{payroll_id}", response_model=PayrollResponse)
-async def get_payslip_by_id(
-    payroll_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(everyone)
-):
-    caller_id = current_user.get("sub")
-    caller_role = current_user.get("role")
-
-    result = await db.execute(
-        select(Payroll).options(joinedload(Payroll.user).joinedload(User.profile)).where(Payroll.id == payroll_id)
-    )
-    entry = result.scalars().first()
-
-    if not entry:
-        raise HTTPException(status_code=404, detail="Target payslip record not found.")
-        
-    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value] and str(entry.user_id) != str(caller_id):
-        raise HTTPException(status_code=403, detail="Access denied. Authority constraint violation.")
-
-    return entry
-
-
-#advance req
-@router.post("/advance-request", status_code=status.HTTP_201_CREATED)
-async def request_salary_advance(
-    amount_requested: float = Form(...),
-    reason: str = Form(...),
-    target_repayment_month: date = Form(...),
-    document: UploadFile | None = File(None),  
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(everyone)
-):
-
-    caller_id = current_user.get("sub")
-    attachment_url = None
-
-    cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
-    cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
-    cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
-    cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
-    cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
-
-    if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
-        raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
-
-    if document and document.filename:
-        try:
-            file_extension = document.filename.split(".")[-1].lower() if "." in document.filename else "dat"
-            unique_filename = f"advances/{uuid.uuid4()}.{file_extension}"
-            
-            s3_client = boto3.client(
-                "s3",
-                endpoint_url=f"https://{cf_account_id}.r2.cloudflarestorage.com",
-                aws_access_key_id=cf_access_key,
-                aws_secret_access_key=cf_secret_key,
-                config=Config(signature_version="s3v4")
-            )
-            
-            file_content = await document.read()
-            s3_client.put_object(
-                Bucket=cf_bucket_name,
-                Key=unique_filename,
-                Body=file_content,
-                ContentType=document.content_type  
-            )
-            
-            attachment_url = f"{cf_public_url.rstrip('/')}/{unique_filename}"
-            
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to upload document file to Cloudflare R2: {str(e)}"
-            )
-
-    new_request = AdvanceSalaryRequest(
-        id=uuid.uuid4(),
-        user_id=caller_id,
-        amount_requested=Decimal(str(amount_requested)),
-        reason=reason,
-        target_repayment_month=target_repayment_month.replace(day=1),
-        document_url=attachment_url,  
-        status=AdvanceStatus.PENDING
-    )
-    
-    db.add(new_request)
-    await db.commit()
-    await db.refresh(new_request)
-    
-    return {
-        "message": "Salary advance request submitted successfully", 
-        "request_id": new_request.id,
-        "document_url": attachment_url
-    }
-
-
-
-@router.patch("/advance-review/{advance_id}", dependencies=[Depends(hr_and_admin)])
-async def review_salary_advance(
-    advance_id: UUID,
-    payload: AdvanceSalaryReview,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(AdvanceSalaryRequest).where(AdvanceSalaryRequest.id == advance_id))
-    advance_req = result.scalars().first()
-    
-    if not advance_req:
-        raise HTTPException(status_code=404, detail="Advance transaction allocation reference entry absent.")
-    if advance_req.status != AdvanceStatus.PENDING:
-        raise HTTPException(status_code=400, detail="Target item was already audited and closed.")
-        
-    advance_req.status = payload.status
-    await db.commit()
-    return {"message": f"Advance application modification settled to: {payload.status.value}"}
-
-
-#pdf

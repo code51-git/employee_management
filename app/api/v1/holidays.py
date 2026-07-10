@@ -4,7 +4,6 @@ from sqlalchemy.future import select
 from sqlalchemy import func, extract
 from uuid import UUID
 from datetime import date
-
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import Holiday

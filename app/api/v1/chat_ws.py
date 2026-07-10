@@ -4,7 +4,6 @@ from sqlalchemy.future import select
 import uuid
 import json
 from datetime import datetime
-
 from app.core.database import get_db
 from app.core.security import verify_jwt_token
 from app.core.notifications import send_multicast_push

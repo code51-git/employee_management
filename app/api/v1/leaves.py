@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks,Form,UploadFile,File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
@@ -13,35 +13,86 @@ from app.schemas.leave import LeaveRequestCreate, LeaveReviewPayload, LeaveRespo
 import re
 from typing import Optional
 import uuid
+import os
+import aioboto3
+
 
 router = APIRouter(prefix="/leaves", tags=["Leave Management"])
 
 # SUBMIT LEAVE REQUEST 
-@router.post("/request", response_model=LeaveResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/request", status_code=status.HTTP_201_CREATED)
 async def submit_leave_request(
-    payload: LeaveRequestCreate, 
+    leave_type: str = Form(...),
+    start_date: date = Form(...),
+    end_date: date = Form(...),
+    reason: str = Form(...),
+    file: UploadFile = File(None), 
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(everyone)
 ):
-
     caller_id = current_user.get("sub")
     
-    calculated_days = (payload.end_date - payload.start_date).days + 1
+    if start_date > end_date:
+        raise HTTPException(status_code=400, detail="Start date cannot fall after end date.")
+        
+    calculated_days = (end_date - start_date).days + 1
     duration_str = f"{calculated_days} days" if calculated_days > 1 else f"{calculated_days} day"
 
+    final_public_url = None
+
+    if file:
+        cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
+        cf_access_key = os.getenv("CF_R2_ACCESS_KEY_ID")
+        cf_secret_key = os.getenv("CF_R2_SECRET_ACCESS_KEY")
+        cf_bucket_name = os.getenv("CF_R2_BUCKET_NAME")
+        cf_public_url = os.getenv("CF_R2_PUBLIC_URL")
+
+        if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
+            raise HTTPException(status_code=500, detail="Cloud storage configuration missing.")
+
+        file_extension = os.path.splitext(file.filename)[1]
+        leave_id = uuid.uuid4() 
+        unique_key = f"leaves/{caller_id}/{leave_id}{file_extension}"
+        r2_endpoint_url = f"https://{cf_account_id}.r2.cloudflarestorage.com"
+
+        file_data = await file.read()
+        session = aioboto3.Session()
+        
+        async with session.client(
+            "s3",
+            endpoint_url=r2_endpoint_url,
+            aws_access_key_id=cf_access_key,
+            aws_secret_access_key=cf_secret_key,
+        ) as s3_client:
+            try:
+                await s3_client.put_object(
+                    Bucket=cf_bucket_name,
+                    Key=unique_key,
+                    Body=file_data,
+                    ContentType=file.content_type
+                )
+                final_public_url = f"{cf_public_url}/{unique_key}"
+            except Exception as cloud_err:
+                raise HTTPException(status_code=500, detail=f"Document upload failed: {str(cloud_err)}")
+    else:
+        leave_id = uuid.uuid4()
+
     new_leave = Leave(
+        id=leave_id,
         user_id=caller_id,
-        leave_type=payload.leave_type,
-        start_date=payload.start_date,
-        end_date=payload.end_date,
+        leave_type=leave_type,
+        start_date=start_date,
+        end_date=end_date,
         duration_days=duration_str,
-        reason=payload.reason,
-        status=LeaveStatus.PENDING
+        reason=reason,
+        status=LeaveStatus.PENDING,
+        leave_document_url=final_public_url
     )
     
     db.add(new_leave)
     await db.commit()
     await db.refresh(new_leave)
+    
     return new_leave
 
 
@@ -93,6 +144,7 @@ async def list_leave_requests(
             "start_date": leave.start_date,
             "end_date": leave.end_date,
             "reason": leave.reason,
+            "document":leave.leave_document_url,
             "status": leave.status,
             "user_details": {
                 "id": leave.user.id,

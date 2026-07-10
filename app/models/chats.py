@@ -4,7 +4,6 @@ from datetime import datetime
 from sqlalchemy import Column, String, ForeignKey, Table, Boolean, DateTime, Text, Enum as SQLEnum,UniqueConstraint
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID
-
 from app.core.database import Base
 
 class ChatType(str, enum.Enum):
@@ -19,7 +18,7 @@ room_members = Table(
     Column("user_id", UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
     Column("is_admin", Boolean, default=False, nullable=False),
     Column("joined_at", DateTime, default=datetime.utcnow, nullable=False),
-    Column("cleared_at", DateTime, nullable=True),  # ← new
+    Column("cleared_at", DateTime, nullable=True),  
 )
 
 class ChatRoom(Base):

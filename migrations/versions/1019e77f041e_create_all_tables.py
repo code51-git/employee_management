@@ -65,8 +65,7 @@ def upgrade() -> None:
     op.create_table('payroll',
     sa.Column('id', sa.Uuid(), nullable=False),
     sa.Column('user_id', sa.Uuid(), nullable=False),
-    sa.Column('pay_period_start', sa.Date(), nullable=False),
-    sa.Column('pay_period_end', sa.Date(), nullable=False),
+
     sa.Column('basic_salary', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('allowances', sa.Numeric(precision=10, scale=2), nullable=False),
     sa.Column('deductions', sa.Numeric(precision=10, scale=2), nullable=False),
