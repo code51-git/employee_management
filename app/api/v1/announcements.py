@@ -30,19 +30,38 @@ async def create_announcement(
 ):
     caller_id = uuid.UUID(current_user.get("sub"))
 
+    naive_expires_at = payload.expires_at.replace(tzinfo=None) if payload.expires_at else None
+
     announcement = Announcement(
         id=uuid.uuid4(),
         title=payload.title,
         content=payload.content,
-        priority=payload.priority,
-        expires_at=payload.expires_at,
+        priority=payload.priority, 
+        expires_at=naive_expires_at,  
         status=AnnouncementStatus.DRAFT,
         created_by=caller_id
     )
+    
     db.add(announcement)
     await db.commit()
+    
+    await db.refresh(announcement)
 
-    return {**announcement.__dict__, "is_read": False, "read_count": 0}
+    response_data = {
+        "id": announcement.id,
+        "title": announcement.title,
+        "content": announcement.content,
+        "priority": announcement.priority,
+        "expires_at": announcement.expires_at,
+        "status": announcement.status,
+        "created_by": announcement.created_by,
+        "created_at": announcement.created_at,
+        "updated_at": announcement.updated_at,
+        "is_read": False,
+        "read_count": 0
+    }
+
+    return response_data
 
 
 #  Publish Announcement 

@@ -568,7 +568,7 @@ async def upload_employee_profile_image(
 #qualification details
 @router.post("/create/qualification", status_code=status.HTTP_201_CREATED, dependencies=[Depends(everyone)])
 async def create_qualification(
-    user_profile_id: UUID = Form(...),
+    user_id: UUID = Form(...), 
     degree_name: str = Form(...),
     institution: str = Form(...),
     passing_year: int = Form(...),
@@ -578,9 +578,10 @@ async def create_qualification(
     
     db: AsyncSession = Depends(get_db)
 ):
-
-    prof_res = await db.execute(select(UserProfile).where(UserProfile.id == user_profile_id))
-    if not prof_res.scalars().first():
+    prof_res = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+    profile = prof_res.scalars().first()
+    
+    if not profile:
         raise HTTPException(status_code=404, detail="Target User Profile not found.")
 
     cf_account_id = os.getenv("CF_R2_ACCOUNT_ID")
@@ -591,6 +592,7 @@ async def create_qualification(
 
     if not all([cf_account_id, cf_access_key, cf_secret_key, cf_bucket_name, cf_public_url]):
         raise HTTPException(status_code=500, detail="Cloud storage configuration error.")
+
 
     s3_client = boto3.client(
         "s3",
@@ -633,7 +635,7 @@ async def create_qualification(
 
     new_qual = EmployeeQualification(
         id=uuid.uuid4(),
-        user_profile_id=user_profile_id,
+        user_profile_id=profile.id,  
         degree_name=degree_name,
         institution=institution,
         passing_year=passing_year,
