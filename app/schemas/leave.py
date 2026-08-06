@@ -3,7 +3,7 @@ from pydantic import BaseModel, field_validator
 from uuid import UUID
 from datetime import date
 from app.models.user import LeaveStatus
-
+from typing import Optional
 class LeaveRequestCreate(BaseModel):
     leave_type: str  
     start_date: date
@@ -38,6 +38,7 @@ class LeaveResponse(BaseModel):
     leave_type: str
     start_date: date
     end_date: date
+    document:Optional[str] = None
     reason: str
     status: LeaveStatus
     
