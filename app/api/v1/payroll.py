@@ -12,7 +12,7 @@ import boto3
 import uuid
 import re
 from typing import Optional
-
+import calendar
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import (
@@ -64,7 +64,13 @@ def recalculate_totals(entry: Payroll) -> Payroll:
         float(entry.overtime_pay) +
         float(entry.allowances)
     )
-    daily_rate = float(entry.basic_salary) / 30.0
+    
+
+    target_year = entry.salary_month.year
+    target_month = entry.salary_month.month
+    days_in_month = calendar.monthrange(target_year, target_month)[1]
+    
+    daily_rate = float(entry.basic_salary) / float(days_in_month)
     lop_deduction = round(float(entry.lop_days) * daily_rate, 2)
     total_deductions = float(entry.deductions) + lop_deduction + float(entry.advance_deduction)
     net = round(max(0.0, gross - total_deductions), 2)
@@ -76,18 +82,19 @@ def recalculate_totals(entry: Payroll) -> Payroll:
 
 
 #  GENERATE PAYROLL
-
 @router.post("/generate", response_model=PayrollResponse, dependencies=[Depends(hr_and_admin)])
 async def generate_employee_payroll(
     payload: PayrollGenerateInput,
     db: AsyncSession = Depends(get_db)
 ):
-
     salary_month_date = parse_salary_month(payload.salary_month)
     month_num = salary_month_date.month
     year_num = salary_month_date.year
 
-    #  Fetch employee 
+    # 📅 Calculate total exact days in the current target month (e.g., July = 31, Feb = 28/29)
+    _, total_days_in_month = calendar.monthrange(year_num, month_num)
+
+    # Fetch employee 
     user_res = await db.execute(
         select(User).options(selectinload(User.profile)).where(User.id == payload.user_id)
     )
@@ -95,7 +102,7 @@ async def generate_employee_payroll(
     if not user or not user.profile:
         raise HTTPException(status_code=404, detail="Employee profile not found.")
 
-    #  Duplicate check
+    # Duplicate check
     existing = await db.execute(
         select(Payroll).where(
             Payroll.user_id == payload.user_id,
@@ -108,20 +115,20 @@ async def generate_employee_payroll(
             detail=f"Payroll already exists for {payload.salary_month}. Use /adjust/{{payroll_id}} to edit."
         )
 
-    #  Basic salary
+    # Basic salary
     master_basic = float(user.profile.basic_salary)
     final_basic = payload.basic_salary_override if payload.basic_salary_override is not None else master_basic
     if final_basic <= 0:
         raise HTTPException(status_code=400, detail="Basic salary must be greater than 0.")
 
-    #  Manual fields 
+    # Manual fields 
     final_hra = payload.hra_override if payload.hra_override is not None else 0.0
     final_travel = payload.travel_allowance_override if payload.travel_allowance_override is not None else 0.0
     final_health = payload.health_allowance_override if payload.health_allowance_override is not None else 0.0
     final_allowances = payload.allowances_override if payload.allowances_override is not None else 0.0
     final_deductions = payload.deductions_override if payload.deductions_override is not None else 0.0
 
-    #  Auto-calculate overtime from EmployeeOvertime table 
+    # Auto-calculate overtime from EmployeeOvertime table 
     ot_res = await db.execute(
         select(func.sum(EmployeeOvertime.ot_final_amount)).where(
             EmployeeOvertime.user_profile_id == user.profile.id,
@@ -131,7 +138,7 @@ async def generate_employee_payroll(
     )
     auto_overtime = float(ot_res.scalar() or 0.0)
 
-    #  Auto-calculate leaves 
+    # Auto-calculate leaves 
     total_leave_days = 0.0
     sick_leave_days = 0.0
     casual_leave_days = 0.0
@@ -175,7 +182,7 @@ async def generate_employee_payroll(
             elif any(x in leave_type_lower for x in ["unpaid", "loss of pay", "lop"]):
                 lop_days += days
 
-    #  Auto-calculate advance deduction 
+    # Auto-calculate advance deduction 
     advance_res = await db.execute(
         select(AdvanceSalaryRequest).where(
             AdvanceSalaryRequest.user_id == payload.user_id,
@@ -186,8 +193,8 @@ async def generate_employee_payroll(
     approved_advances = advance_res.scalars().all()
     advance_deduction = sum(float(adv.amount_requested) for adv in approved_advances)
 
-    #  Calculate gross, LOP deduction, net 
-    daily_rate = final_basic / 30.0
+    #  Calculate dynamic daily rate using exact month days (31 for July, 28/29 for Feb, etc.)
+    daily_rate = final_basic / float(total_days_in_month)
     lop_deduction = round(lop_days * daily_rate, 2)
 
     gross = round(
@@ -198,7 +205,6 @@ async def generate_employee_payroll(
     total_deductions = final_deductions + lop_deduction + advance_deduction
     net = round(max(0.0, gross - total_deductions), 2)
 
-    # Create payroll record 
     new_payroll = Payroll(
         user_id=payload.user_id,
         salary_month=salary_month_date,
@@ -220,14 +226,12 @@ async def generate_employee_payroll(
         status=PayrollStatus.DRAFT
     )
 
-    # Mark advances as deducted
     for adv in approved_advances:
         adv.status = AdvanceStatus.DEDUCTED
 
     db.add(new_payroll)
     await db.commit()
 
-    # Reload with user relationship
     result = await db.execute(
         select(Payroll)
         .options(joinedload(Payroll.user).joinedload(User.profile))

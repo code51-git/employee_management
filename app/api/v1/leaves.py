@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks,Form,UploadFile,File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks,Form,UploadFile,File,Path
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
@@ -9,7 +9,7 @@ from app.services.email import send_leave_status_email
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.user import Leave, LeaveStatus, User, UserRole,EmployeeLeaveBalance,AdvanceSalaryRequest
-from app.schemas.leave import LeaveRequestCreate, LeaveReviewPayload, LeaveResponse,LeaveListResponse,LeaveSummaryResponse
+from app.schemas.leave import LeaveRequestCreate, LeaveReviewPayload, LeaveResponse,LeaveListResponse,LeaveSummaryResponse,LeaveDetailResponse
 import re
 from typing import Optional
 import uuid
@@ -161,6 +161,67 @@ async def list_leave_requests(
         "size": size,
         "total_pages": (total_count + size - 1) // size if total_count > 0 else 0,
         "items": formatted_items
+    }
+
+#get by id
+@router.get(
+    "/{leave_id}",
+    response_model=LeaveDetailResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_leave_request_detail(
+    leave_id: uuid.UUID = Path(..., description="The UUID of the leave request"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = str(current_user.get("sub"))
+    caller_role = current_user.get("role")
+
+    query = (
+        select(Leave)
+        .options(
+            joinedload(Leave.user)
+            .joinedload(User.profile)
+        )
+        .where(Leave.id == leave_id)
+    )
+
+    result = await db.execute(query)
+    leave = result.scalars().first()
+
+    if not leave:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Leave request not found."
+        )
+
+    # Permission check: Non-admins can only view their own requests
+    is_admin = caller_role in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]
+    if not is_admin and str(leave.user_id) != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You cannot view another employee's leave details."
+        )
+
+    profile = leave.user.profile if leave.user and leave.user.profile else None
+
+    return {
+        "id": leave.id,
+        "user_id": leave.user_id,
+        "duration_days": leave.duration_days,
+        "leave_type": leave.leave_type,
+        "start_date": leave.start_date,
+        "end_date": leave.end_date,
+        "reason": leave.reason,
+        "document": leave.leave_document_url,
+        "status": leave.status,
+        "user_details": {
+            "id": leave.user.id,
+            "email": leave.user.email,
+            "first_name": profile.first_name if profile else None,
+            "last_name": profile.last_name if profile else None,
+            "employee_id": profile.employee_id if profile else None,
+        } if leave.user else None
     }
 
 
