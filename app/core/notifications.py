@@ -4,6 +4,8 @@ import logging
 import firebase_admin
 from firebase_admin import credentials, messaging
 from typing import List, Dict, Optional
+import uuid
+
 
 logger = logging.getLogger(__name__)
 
@@ -63,3 +65,13 @@ async def send_multicast_push(
     except Exception as e:
         logger.error(f"❌ Critical exception during FCM multicast routing: {e}")
         return {"success_count": 0, "failure_count": len(tokens), "invalid_tokens": []}
+
+
+async def send_payroll_notification(user_id: uuid.UUID, month_str: str, net_amount: float):
+    """
+    Background worker/trigger:
+    Can publish to Redis, push via FCM/WebSockets, or insert into a notifications table.
+    """
+    message = f"Your payroll details for {month_str} have been updated. Revised Net Salary: ₹{net_amount:,.2f}"
+    # e.g., await notification_service.send(user_id=user_id, title="Payroll Adjusted", body=message)
+    print(f"[NOTIFICATION] Sent to user {user_id}: {message}")

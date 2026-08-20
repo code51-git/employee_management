@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, Form, File
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, Form, File,BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, extract
@@ -26,6 +26,8 @@ from app.schemas.payroll import (
     AdvanceSalaryCreate, AdvanceSalaryResponse,
     AdvanceSalaryReview, AdvanceSalarySummaryResponse
 )
+from app.core.notifications import send_payroll_notification
+
 
 router = APIRouter(prefix="/payroll", tags=["Payroll Management"])
 
@@ -91,7 +93,7 @@ async def generate_employee_payroll(
     month_num = salary_month_date.month
     year_num = salary_month_date.year
 
-    # 📅 Calculate total exact days in the current target month (e.g., July = 31, Feb = 28/29)
+    #  Calculate total exact days in the current target month (e.g., July = 31, Feb = 28/29)
     _, total_days_in_month = calendar.monthrange(year_num, month_num)
 
     # Fetch employee 
@@ -241,11 +243,11 @@ async def generate_employee_payroll(
 
 
 #  ADJUST PAYROLL 
-
 @router.patch("/adjust/{payroll_id}", response_model=PayrollResponse, dependencies=[Depends(hr_and_admin)])
 async def adjust_payroll(
-    payroll_id: UUID,
+    payroll_id: uuid.UUID,
     payload: PayrollAdjustmentPayload,
+    background_tasks: BackgroundTasks,  
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(select(Payroll).where(Payroll.id == payroll_id))
@@ -267,11 +269,17 @@ async def adjust_payroll(
     if payload.advance_deduction is not None:  entry.advance_deduction = payload.advance_deduction
     if payload.status is not None:             entry.status = payload.status
 
-    # Recalculate gross and net after any field change
     entry = recalculate_totals(entry)
     entry.generated_at = datetime.utcnow()
 
     await db.commit()
+
+    background_tasks.add_task(
+        send_payroll_notification,
+        user_id=entry.user_id,
+        month_str=str(entry.salary_month),
+        net_amount=float(entry.net_salary)
+    )
 
     final = await db.execute(
         select(Payroll)
