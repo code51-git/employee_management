@@ -163,6 +163,44 @@ async def list_leave_requests(
         "items": formatted_items
     }
 
+
+#leave summary
+@router.get("/summary", response_model=LeaveSummaryResponse)
+async def get_leave_summary_metrics(
+    target_user_id: Optional[uuid.UUID] = Query(None, description="HR/Admin can pass a specific user UUID to filter metrics"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+
+    query = select(Leave.status, func.count(Leave.id))
+
+    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
+        query = query.where(Leave.user_id == caller_id)
+    elif target_user_id:
+        query = query.where(Leave.user_id == target_user_id)
+
+    query = query.group_by(Leave.status)
+    result = await db.execute(query)
+    
+    status_counts = {row[0]: row[1] for row in result.all()}
+
+    pending_count = status_counts.get(LeaveStatus.PENDING, 0)
+    approved_count = status_counts.get(LeaveStatus.APPROVED, 0)
+    rejected_count = status_counts.get(LeaveStatus.REJECTED, 0)
+    
+    total_count = pending_count + approved_count + rejected_count
+
+    return {
+        "total": total_count,
+        "pending": pending_count,
+        "approved": approved_count,
+        "rejected": rejected_count
+    }
+
+
 #get by id
 @router.get(
     "/{leave_id}",
@@ -349,39 +387,3 @@ async def get_employee_dashboard_summary(
         ]
     }
 
-
-#leave summary
-@router.get("/summary", response_model=LeaveSummaryResponse)
-async def get_leave_summary_metrics(
-    target_user_id: Optional[uuid.UUID] = Query(None, description="HR/Admin can pass a specific user UUID to filter metrics"),
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(everyone)
-):
-
-    caller_id = current_user.get("sub")
-    caller_role = current_user.get("role")
-
-    query = select(Leave.status, func.count(Leave.id))
-
-    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
-        query = query.where(Leave.user_id == caller_id)
-    elif target_user_id:
-        query = query.where(Leave.user_id == target_user_id)
-
-    query = query.group_by(Leave.status)
-    result = await db.execute(query)
-    
-    status_counts = {row[0]: row[1] for row in result.all()}
-
-    pending_count = status_counts.get(LeaveStatus.PENDING, 0)
-    approved_count = status_counts.get(LeaveStatus.APPROVED, 0)
-    rejected_count = status_counts.get(LeaveStatus.REJECTED, 0)
-    
-    total_count = pending_count + approved_count + rejected_count
-
-    return {
-        "total": total_count,
-        "pending": pending_count,
-        "approved": approved_count,
-        "rejected": rejected_count
-    }
