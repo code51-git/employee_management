@@ -60,3 +60,25 @@ class LeaveSummaryResponse(BaseModel):
     pending: int
     approved: int
     rejected: int
+
+class LeaveUserDetails(BaseModel):
+    id: UUID
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    employee_id: Optional[str] = None
+
+class LeaveDetailResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    duration_days: str
+    leave_type: str
+    start_date: date
+    end_date: date
+    reason: str
+    document: Optional[str] = None
+    status: LeaveStatus
+    user_details: Optional[LeaveUserDetails] = None
+
+    class Config:
+        from_attributes = True

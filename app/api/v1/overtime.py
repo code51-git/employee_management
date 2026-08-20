@@ -11,7 +11,7 @@ from typing import Optional
 from sqlalchemy.orm import joinedload
 from decimal import Decimal
 from datetime import date
-
+import calendar
 
 router = APIRouter(prefix="/overtime", tags=["Employee Overtime Management"])
 
@@ -24,8 +24,7 @@ def format_duration(hours_float: float) -> str:
         duration_string += f" {minutes} min"
     return duration_string
 
-
-
+#add ot
 @router.post("/log", status_code=status.HTTP_201_CREATED)
 async def log_employee_overtime(
     payload: OvertimeLogCreate, 
@@ -42,11 +41,18 @@ async def log_employee_overtime(
 
     basic_salary = Decimal(str(profile.basic_salary or "0.00"))
     hours_worked = Decimal(str(payload.hours_worked))
-    
     ot_multiplier = Decimal(str(getattr(payload, "ot_rate", "2.00")))
 
-    daily_rate = basic_salary / Decimal("30")
+    # 📅 Calculate exact days in the target month based on date_worked
+    worked_year = payload.date_worked.year
+    worked_month = payload.date_worked.month
+    _, total_days_in_month = calendar.monthrange(worked_year, worked_month)
+
+    # 🌟 Calculate dynamic daily and hourly rates
+    days_in_month_dec = Decimal(str(total_days_in_month))
+    daily_rate = basic_salary / days_in_month_dec
     hourly_base_rate = daily_rate / Decimal("8")
+    
     final_calculated_amount = hourly_base_rate * ot_multiplier * hours_worked
 
     new_ot = EmployeeOvertime(
@@ -372,8 +378,14 @@ async def process_monthly_overtime(
             detail=f"No overtime records found to process for this employee in {target_year}-{target_month:02d}."
         )
 
+    #  Calculate exact days in the specified target month
+    _, total_days_in_month = calendar.monthrange(target_year, target_month)
+    days_in_month_dec = Decimal(str(total_days_in_month))
+
     basic_salary = Decimal(str(profile.basic_salary or "0.00"))
-    daily_rate = basic_salary / Decimal("30")
+
+    #  Calculate dynamic daily and hourly rates
+    daily_rate = basic_salary / days_in_month_dec
     hourly_base_rate = daily_rate / Decimal("8")
 
     total_approved_amount = Decimal("0.00")
