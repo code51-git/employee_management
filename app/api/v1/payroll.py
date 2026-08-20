@@ -362,6 +362,36 @@ async def list_payroll_history(
     }
 
 
+
+#  ADVANCE SALARY SUMMARY 
+
+@router.get("/summary", response_model=AdvanceSalarySummaryResponse)
+async def advance_salary_summary(
+    target_user_id: Optional[uuid.UUID] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(everyone)
+):
+    caller_id = current_user.get("sub")
+    caller_role = current_user.get("role")
+
+    query = select(AdvanceSalaryRequest.status, func.count(AdvanceSalaryRequest.id))
+
+    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
+        query = query.where(AdvanceSalaryRequest.user_id == caller_id)
+    elif target_user_id:
+        query = query.where(AdvanceSalaryRequest.user_id == target_user_id)
+
+    query = query.group_by(AdvanceSalaryRequest.status)
+    result = await db.execute(query)
+    counts = {row[0]: row[1] for row in result.all()}
+
+    return {
+        "total": sum(counts.values()),
+        "pending": counts.get(AdvanceStatus.PENDING, 0),
+        "approved": counts.get(AdvanceStatus.APPROVED, 0),
+        "rejected": counts.get(AdvanceStatus.REJECTED, 0),
+    }
+
 #  GET PAYROLL BY ID 
 
 @router.get("/{payroll_id}", response_model=PayrollResponse)
@@ -543,32 +573,3 @@ async def review_advance_request(
     await db.commit()
     return {"message": f"Advance status updated to {payload.status.value}"}
 
-
-#  ADVANCE SALARY SUMMARY 
-
-@router.get("/summary", response_model=AdvanceSalarySummaryResponse)
-async def advance_salary_summary(
-    target_user_id: Optional[uuid.UUID] = Query(None),
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(everyone)
-):
-    caller_id = current_user.get("sub")
-    caller_role = current_user.get("role")
-
-    query = select(AdvanceSalaryRequest.status, func.count(AdvanceSalaryRequest.id))
-
-    if caller_role not in [UserRole.SUPER_ADMIN.value, UserRole.HR_ADMIN.value]:
-        query = query.where(AdvanceSalaryRequest.user_id == caller_id)
-    elif target_user_id:
-        query = query.where(AdvanceSalaryRequest.user_id == target_user_id)
-
-    query = query.group_by(AdvanceSalaryRequest.status)
-    result = await db.execute(query)
-    counts = {row[0]: row[1] for row in result.all()}
-
-    return {
-        "total": sum(counts.values()),
-        "pending": counts.get(AdvanceStatus.PENDING, 0),
-        "approved": counts.get(AdvanceStatus.APPROVED, 0),
-        "rejected": counts.get(AdvanceStatus.REJECTED, 0),
-    }

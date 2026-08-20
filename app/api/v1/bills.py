@@ -151,25 +151,6 @@ async def list_bill_requests(
     }
 
 
-# REVIEW BILL REQUEST (HR & ADMIN ONLY)
-@router.patch("/review/{bill_id}", dependencies=[Depends(hr_and_admin)])
-async def review_bill_request(
-    bill_id: UUID,
-    payload: BillReviewPayload,
-    db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(BillRequest).where(BillRequest.id == bill_id))
-    bill = result.scalars().first()
-
-    if not bill:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target bill application record not found.")
-
-    if bill.status != BillStatus.PENDING:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This bill has already been processed.")
-
-    bill.status = payload.status
-    await db.commit()
-    return {"message": f"Bill status successfully updated to {payload.status.value}"}
 
 #biil summary
 @router.get("/summary", response_model=BillSummaryResponse)
@@ -206,3 +187,23 @@ async def get_bill_reimbursement_summary(
         "approved": approved_count,
         "rejected": rejected_count
     }
+
+# REVIEW BILL REQUEST (HR & ADMIN ONLY)
+@router.patch("/review/{bill_id}", dependencies=[Depends(hr_and_admin)])
+async def review_bill_request(
+    bill_id: UUID,
+    payload: BillReviewPayload,
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(BillRequest).where(BillRequest.id == bill_id))
+    bill = result.scalars().first()
+
+    if not bill:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target bill application record not found.")
+
+    if bill.status != BillStatus.PENDING:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This bill has already been processed.")
+
+    bill.status = payload.status
+    await db.commit()
+    return {"message": f"Bill status successfully updated to {payload.status.value}"}
