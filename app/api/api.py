@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from app.api.v1 import( auth ,users ,meetings,holidays,leaves,bills,payroll,admin_leave_balances,overtime,chat,chat_ws,payroll_pdf,tasks,experience
-                       ,announcements)
+                       ,announcements,payslips)
 
 api_router = APIRouter()
 
@@ -19,5 +19,7 @@ api_router.include_router(payroll_pdf.router)
 api_router.include_router(tasks.router)
 api_router.include_router(experience.router)
 api_router.include_router(announcements.router)
+api_router.include_router(payslips.router)
+
 
 
