@@ -358,3 +358,23 @@ class PreviousCompanyDetail(Base):
     company_document_urls = Column(ARRAY(String(2048)), nullable=True, default=[])
 
     profile = relationship("UserProfile", back_populates="previous_companies")
+
+class EmployeePayslip(Base):
+    __tablename__ = "employee_payslips"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), 
+        ForeignKey("user_profiles.id", ondelete="CASCADE"), 
+        nullable=False, 
+        index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=True) 
+    
+    old_payslip_url: Mapped[str] = mapped_column(String(2048), nullable=True, default=None)
+    new_payslip_url: Mapped[str] = mapped_column(String(2048), nullable=True, default=None)
+
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    profile = relationship("UserProfile", back_populates="payslips")
