@@ -106,6 +106,11 @@ class UserProfile(Base):
     overtime_records = relationship("EmployeeOvertime", back_populates="profile", cascade="all, delete-orphan")
     tasks = relationship("EmployeeTask", back_populates="profile", cascade="all, delete-orphan")
     previous_companies = relationship("PreviousCompanyDetail",back_populates="profile", cascade="all, delete-orphan")
+    payslips: Mapped[List["EmployeePayslip"]] = relationship(
+        "EmployeePayslip",
+        back_populates="profile",
+        cascade="all, delete-orphan"
+    )
     @property
     def company_experience_years(self) -> str: 
 
