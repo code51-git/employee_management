@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Form, File, UploadFile, Path, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
-
+from app.models.user import UserRole
 from app.models.user import UserProfile
 from app.models.user import EmployeePayslip
 from app.schemas.payslips import PayslipResponse, BulkPayslipUploadResponse
@@ -53,9 +53,8 @@ async def upload_file_to_r2(file_obj: UploadFile, folder_path: str) -> str:
     return f"{cf_public_url.rstrip('/')}/{unique_key}"
 
 
-# -------------------------------------------------------------
+
 # 1. BULK UPLOAD PAYSLIPS
-# -------------------------------------------------------------
 @router.post(
     "/bulk-upload",
     response_model=BulkPayslipUploadResponse,
@@ -119,9 +118,8 @@ async def bulk_upload_payslips(
     }
 
 
-# -------------------------------------------------------------
+
 # 2. LIST PAYSLIPS BY EMPLOYEE
-# -------------------------------------------------------------
 @router.get(
     "/employee/{target_user_id}",
     response_model=List[PayslipResponse],
@@ -133,12 +131,28 @@ async def get_employee_payslips(
     current_user: dict = Depends(everyone)
 ):
     caller_id = str(current_user.get("sub"))
-    caller_role = current_user.get("role")
-    is_admin = caller_role in ["SUPER_ADMIN", "HR_ADMIN"]
+    raw_role = current_user.get("role") or ""
+    
+    # Extract string whether raw_role is an Enum or a string
+    role_str = (raw_role.value if hasattr(raw_role, "value") else str(raw_role)).lower().strip()
 
-    # Authorization guard: Employees can only check their own payslips
+    # Compare against lowercase enum values and uppercase fallbacks
+    admin_roles = {
+        UserRole.SUPER_ADMIN.value.lower(),
+        UserRole.HR_ADMIN.value.lower(),
+        "super_admin",
+        "hr_admin",
+        "superadmin",
+        "hr"
+    }
+    
+    is_admin = role_str in admin_roles
+
     if not is_admin and str(target_user_id) != caller_id:
-        raise HTTPException(status_code=403, detail="Access denied. Cannot view another employee's payslips.")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied. Cannot view another employee's payslips. (Detected role: '{raw_role}')"
+        )
 
     prof_res = await db.execute(select(UserProfile).where(UserProfile.user_id == target_user_id))
     profile = prof_res.scalars().first()
@@ -153,9 +167,7 @@ async def get_employee_payslips(
     return res.scalars().all()
 
 
-# -------------------------------------------------------------
 # 3. EDIT / REPLACE SINGLE PAYSLIP FILE
-# -------------------------------------------------------------
 @router.patch(
     "/{payslip_id}",
     response_model=PayslipResponse,
@@ -189,9 +201,7 @@ async def update_payslip_record(
     return payslip
 
 
-# -------------------------------------------------------------
 # 4. DELETE PAYSLIP RECORD
-# -------------------------------------------------------------
 @router.delete(
     "/{payslip_id}",
     status_code=status.HTTP_200_OK,
