@@ -47,20 +47,23 @@ async def global_rate_limiter(request: Request = None):
 
 #-----------------------------------------------------------------------------------------------------------
 
+from zoneinfo import ZoneInfo
+from datetime import datetime, date, time
+
+IST = ZoneInfo("Asia/Kolkata")
+
 async def send_birthday_notifications():
     while True:
-        now = datetime.now()
-
-        next_run = datetime.combine(now.date(), time(9, 0, 0))
+        now = datetime.now(IST)
+        next_run = datetime.combine(now.date(), time(9, 0, 0), tzinfo=IST)
         if now >= next_run:
             next_run = datetime.combine(
                 date.fromordinal(now.date().toordinal() + 1),
-                time(9, 0, 0)
+                time(9, 0, 0),
+                tzinfo=IST
             )
-
         wait_seconds = (next_run - now).total_seconds()
         await asyncio.sleep(wait_seconds)
-
         await check_and_notify_birthdays()
 
 
