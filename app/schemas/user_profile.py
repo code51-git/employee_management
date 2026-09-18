@@ -104,7 +104,7 @@ class UserProfileUpdate(BaseModel):
     first_name: str | None = None
     last_name: str | None = None
     gender: str | None = None
-    dob: str | None = None
+    dob: date | None = None
 
     phone_number: str | None = None
     emergency_number: str | None = None
