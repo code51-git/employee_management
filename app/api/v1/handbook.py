@@ -9,7 +9,7 @@ from sqlalchemy.future import select
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
 from app.models.announcement import Handbook
-from app.schemas.handbook import HandbookResponse, HandbookListResponse
+from app.schemas.handbook import HandbookResponse, HandbookListResponse,HandbookUpdate
 
 router = APIRouter(prefix="/handbook", tags=["Employee Handbook"])
 
@@ -99,3 +99,34 @@ async def get_current_handbook(db: AsyncSession = Depends(get_db)):
 async def list_handbooks(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Handbook).order_by(Handbook.uploaded_at.desc()))
     return {"items": result.scalars().all()}
+
+
+#update
+
+@router.patch("/{handbook_id}", response_model=HandbookResponse, dependencies=[Depends(hr_and_admin)])
+async def update_handbook(
+    handbook_id: uuid.UUID,
+    payload: HandbookUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Handbook).where(Handbook.id == handbook_id))
+    handbook = result.scalars().first()
+
+    if not handbook:
+        raise HTTPException(status_code=404, detail="Handbook not found.")
+
+    update_data = payload.model_dump(exclude_unset=True)
+
+    # If this one is being set active, deactivate all others first
+    if update_data.get("is_active") is True:
+        others = await db.execute(select(Handbook).where(Handbook.id != handbook_id))
+        for other in others.scalars().all():
+            other.is_active = False
+
+    for key, value in update_data.items():
+        setattr(handbook, key, value)
+
+    await db.commit()
+    await db.refresh(handbook)
+
+    return handbook

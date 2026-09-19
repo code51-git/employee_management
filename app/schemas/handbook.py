@@ -17,3 +17,7 @@ class HandbookResponse(BaseModel):
 
 class HandbookListResponse(BaseModel):
     items: list[HandbookResponse]
+
+class HandbookUpdate(BaseModel):
+    title: str | None = None
+    is_active: bool | None = None
