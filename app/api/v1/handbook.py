@@ -5,6 +5,7 @@ from botocore.config import Config
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from typing import Optional
 
 from app.core.database import get_db
 from app.core.permissions import hr_and_admin, everyone
@@ -96,10 +97,19 @@ async def get_current_handbook(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/list", response_model=HandbookListResponse, dependencies=[Depends(hr_and_admin)])
-async def list_handbooks(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Handbook).order_by(Handbook.uploaded_at.desc()))
-    return {"items": result.scalars().all()}
+async def list_handbooks(
+    is_active: Optional[bool] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(Handbook)
 
+    if is_active is not None:
+        query = query.where(Handbook.is_active == is_active)
+
+    query = query.order_by(Handbook.uploaded_at.desc())
+
+    result = await db.execute(query)
+    return {"items": result.scalars().all()}
 
 #update
 
