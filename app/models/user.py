@@ -9,7 +9,7 @@ from app.core.utils import format_experience_string
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID,ARRAY
 import enum
-from sqlalchemy import func
+from sqlalchemy import func , Enum as SAEnum
 class UserRole(str, Enum):
     SUPER_ADMIN = "super_admin"
     HR_ADMIN = "hr_admin"
@@ -121,16 +121,23 @@ class UserProfile(Base):
 
 
 #  ATTENDANCE MANAGEMENT  
+class AttendanceStatus(str, enum.Enum):
+    PRESENT = "present"
+    HALF_DAY = "half_day"   
+    ABSENT = "absent"       
+
+
 class Attendance(Base):
     __tablename__ = "attendance"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    
+
     work_date: Mapped[date] = mapped_column(Date, default=date.today, index=True, nullable=False)
     clock_in: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     clock_out: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     total_hours: Mapped[Optional[float]] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(SAEnum(AttendanceStatus, name="attendance_status"), nullable=False, default=AttendanceStatus.PRESENT)
 
     user: Mapped["User"] = relationship(back_populates="attendance_records")
 
