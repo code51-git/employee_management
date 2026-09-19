@@ -1,10 +1,11 @@
 import uuid
 import enum
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, Enum as SQLEnum
+from sqlalchemy import String, Text, DateTime, Boolean, ForeignKey, Enum as SQLEnum , Column
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 
 class AnnouncementPriority(str, enum.Enum):
@@ -57,3 +58,16 @@ class AnnouncementRead(Base):
     __table_args__ = (
         __import__('sqlalchemy').UniqueConstraint("announcement_id", "user_id", name="uq_announcement_read"),
     )
+
+
+class Handbook(Base):
+    __tablename__ = "handbooks"
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title = Column(String, nullable=False)
+    file_url = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)         
+    uploaded_by = Column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    uploaded_at = Column(DateTime, default=datetime.utcnow)
+
+    uploader = relationship("User", foreign_keys=[uploaded_by])
