@@ -34,8 +34,8 @@ async def list_employees(
     db: AsyncSession = Depends(get_db)
 ):
 
-    base_query = select(User).join(UserProfile)
-    
+    base_query = select(User).join(UserProfile).where(User.role == UserRole.USER)
+
     if search:
         search_filter = f"%{search}%"
         base_query = base_query.where(
@@ -43,7 +43,7 @@ async def list_employees(
             (UserProfile.last_name.ilike(search_filter)) |
             (UserProfile.employee_id.ilike(search_filter))
         )
-        
+
     if department:
         base_query = base_query.where(UserProfile.department.ilike(f"%{department}%"))
 
@@ -72,7 +72,7 @@ async def list_employees(
         .offset(offset)
         .limit(size)
     )
-    
+
     fetch_result = await db.execute(fetch_query)
     users = fetch_result.scalars().unique().all()
 
