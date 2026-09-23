@@ -37,7 +37,7 @@ def compute_hours(clock_in: datetime, clock_out: datetime | None) -> float | Non
 
 
 # MARK ATTENDANCE MANUALLY (HR/Admin)
-@router.post("/mark", response_model=AttendanceResponse, dependencies=[Depends(hr_and_admin)])
+@router.post("/mark", response_model=AttendanceResponse, dependencies=[Depends(everyone)])
 async def mark_attendance(
     payload: AttendanceMarkRequest,
     db: AsyncSession = Depends(get_db),
